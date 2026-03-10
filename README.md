@@ -80,7 +80,7 @@ sudo bash backup-sqlite.sh
 0 3 * * * /bin/bash /srv/docker/dabs/backup-sqlite.sh
 ```
 
-Or trigger via a [Komodo](https://github.com/mbecker20/komodo) Action using [KCR](https://github.com/kayaman78/kdd):
+Or trigger via a [Komodo](https://github.com/mbecker20/komodo) Action using [KCR](https://github.com/kayaman78/kcr):
 
 ```json
 {
