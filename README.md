@@ -1,8 +1,14 @@
 # DABS — Docker Automated Backup for SQLite
 
-**Version**: 1.0 | **Status**: Active | **Platform**: Debian / Ubuntu
+**Project Status**: Active | **Version**: 1.0 | **Maintained**: Yes
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Docker](https://img.shields.io/badge/docker-required-blue.svg)](https://www.docker.com/)
+[![Platform](https://img.shields.io/badge/platform-Debian%20%2F%20Ubuntu-informational.svg)](https://www.debian.org/)
 
 Automatic SQLite backup script for Docker environments. Discovers SQLite databases mounted by running containers, stops each service briefly, creates compressed backups, then restarts the service. Sends an HTML email report on completion.
+
+> Part of the **KDD ecosystem** — see also [KDD](https://github.com/kayaman78/kdd) for MySQL / PostgreSQL / MongoDB backups and [KCR](https://github.com/kayaman78/kcr) to run DABS from a Komodo Action.
 
 ---
 
@@ -35,21 +41,21 @@ All settings are at the top of the script.
 
 ```bash
 DRY_RUN="off"                          # "on" to simulate without writing anything
-BASE_DIR="/srv/docker"                 # Root path to scan for compose files
-BACKUP_ROOT="/srv/docker/kdd/sqlite"   # Where backups are stored
-RETENTION_DAYS=7                       # Days to keep backups and logs
-STOP_TIMEOUT=60                        # Seconds to wait for container stop
+BASE_DIR="/srv/docker"                 # Root directory to scan for compose files
+BACKUP_ROOT="/srv/docker/dabs/backups" # Root directory where backups will be stored
+RETENTION_DAYS=7                       # How many days to keep backups and logs
+STOP_TIMEOUT=60                        # Seconds to wait for container stop before proceeding
 
-EXCLUDED_SERVICES=("homeassistant" "pihole")  # Services to skip (exact compose service name)
+EXCLUDED_SERVICES=()                   # Exact compose service names to skip
 
-SMTP_SERVER="192.168.7.5"
-SMTP_PORT="25"          # 25 = plain | 465 = SMTPS | 587 = STARTTLS
+SMTP_SERVER="smtp.example.com"
+SMTP_PORT="587"         # 25 = plain relay | 465 = SMTPS | 587 = STARTTLS
 SMTP_USER=""            # Leave empty for unauthenticated relay
 SMTP_PASS=""
 
-EMAIL_FROM="alert@example.com"
+EMAIL_FROM="dabs@example.com"
 EMAIL_TO="admin@example.com"
-EMAIL_SUBJECT_PREFIX="Backup SQLite"
+EMAIL_SUBJECT_PREFIX="SQLite Backup"
 ```
 
 > **TLS is selected automatically by port**: 465 → SMTPS, 587 → STARTTLS, anything else → plain.
@@ -80,7 +86,9 @@ sudo bash backup-sqlite.sh
 0 3 * * * /bin/bash /srv/docker/dabs/backup-sqlite.sh
 ```
 
-Or trigger via a [Komodo](https://github.com/mbecker20/komodo) Action using [KCR](https://github.com/kayaman78/kcr):
+### Running from Komodo via KCR
+
+Use [KCR](https://github.com/kayaman78/kcr) to trigger DABS directly from a Komodo Action:
 
 ```json
 {
@@ -90,6 +98,8 @@ Or trigger via a [Komodo](https://github.com/mbecker20/komodo) Action using [KCR
   "stop_on_error": true
 }
 ```
+
+Then combine it with a KDD Action inside a **Komodo Procedure** for full database coverage in one scheduled job.
 
 ---
 
@@ -110,6 +120,15 @@ Or trigger via a [Komodo](https://github.com/mbecker20/komodo) Action using [KCR
 - Databases not mounted by any running container are skipped automatically
 - Services in `EXCLUDED_SERVICES` are ignored entirely — useful for services like Home Assistant that manage their own backups
 - Log files rotate with the same retention policy as backups
+
+---
+
+## Related Projects
+
+| Project | Description |
+|---------|-------------|
+| [KDD](https://github.com/kayaman78/kdd) | Docker backup for MySQL, PostgreSQL, MongoDB |
+| [KCR](https://github.com/kayaman78/kcr) | Komodo Action to run shell commands on remote servers |
 
 ---
 
