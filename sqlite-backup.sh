@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # DABS — Docker Automated Backup for SQLite
-# Version: 1.0
+# Version: 1.1
 # Platform: Debian / Ubuntu
-# https://github.com/youruser/dabs
+# https://github.com/kayaman78/dabs
 # ==============================================================================
 
 # --- GENERAL SETTINGS ---
@@ -12,6 +12,7 @@ BASE_DIR="/srv/docker"                     # Root directory to scan for compose 
 BACKUP_ROOT="/srv/docker/dabs/backups"     # Root directory where backups will be stored
 RETENTION_DAYS=7                           # How many days to keep backups and logs
 STOP_TIMEOUT=60                            # Seconds to wait for container stop before proceeding
+SIZE_DROP_WARN=20                          # % size drop vs previous backup that triggers a warning
 
 # Services to skip — exact compose service names (com.docker.compose.service label)
 # Example: EXCLUDED_SERVICES=("homeassistant" "pihole")
@@ -26,9 +27,6 @@ SMTP_PASS=""
 # --- EMAIL SETTINGS ---
 EMAIL_FROM="dabs@example.com"
 EMAIL_TO="admin@example.com"
-
-# Subject prefix — hostname and date are appended automatically.
-# Final result: "[✅ OK] Backup SQLite | myserver | 2025-01-15 03:00"
 EMAIL_SUBJECT_PREFIX="SQLite Backup"
 
 # ==============================================================================
@@ -36,14 +34,12 @@ EMAIL_SUBJECT_PREFIX="SQLite Backup"
 # ==============================================================================
 [[ $EUID -ne 0 ]] && echo "Error: run as root or with sudo." && exit 1
 
-# Daily log file (does not grow indefinitely)
 LOG_DIR="$BACKUP_ROOT/log"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/backup-sqlite_$(date +%Y%m%d).log"
 touch "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-# Docker is mandatory
 if ! command -v docker &>/dev/null; then
     echo "FATAL ERROR: 'docker' not found. Cannot continue." >&2
     exit 1
@@ -55,6 +51,7 @@ declare -A DEP_MAP=(
     [jq]="jq"
     [swaks]="swaks"
     [gzip]="gzip"
+    [sqlite3]="sqlite3"
 )
 
 MISSING_PKGS=()
@@ -76,38 +73,104 @@ HOSTNAME=$(hostname)
 
 TABLE_ROWS=""
 GLOBAL_STATUS="OK"
-declare -A SEEN_DBS  # prevents double-processing the same db path
+declare -A SEEN_DBS
 COUNT_OK=0
 COUNT_ERR=0
 COUNT_DRY=0
+COUNT_VERIFY_OK=0
+COUNT_VERIFY_WARN=0
+COUNT_VERIFY_ERR=0
 
 echo "============================================================"
 echo "START SQLite Backup: $(date) — Host: $HOSTNAME"
 echo "Mode: $([ "$DRY_RUN" == "on" ] && echo "DRY-RUN (no backup will be written)" || echo "PRODUCTION")"
-if [ ${#EXCLUDED_SERVICES[@]} -gt 0 ]; then
-    echo "Excluded services: ${EXCLUDED_SERVICES[*]}"
-fi
+[ ${#EXCLUDED_SERVICES[@]} -gt 0 ] && echo "Excluded services: ${EXCLUDED_SERVICES[*]}"
 echo "============================================================"
 
 # ==============================================================================
-# PHASE 1 — SCAN: collect all databases grouped by service
-# Stop/start happens once per service, even if it has multiple databases.
+# VERIFY FUNCTION
+# Checks a freshly created .gz backup:
+#   1. gzip integrity
+#   2. SQLite PRAGMA integrity_check (decompress to tmp)
+#   3. Size comparison vs previous backup (warn if drop > SIZE_DROP_WARN%)
+#
+# Outputs: "OK" | "WARN:<reason>" | "FAIL:<reason>"
 # ==============================================================================
-declare -A SERVICE_DBS   # SERVICE_DBS[svc]="path1\npath2\n..."
-declare -A SERVICE_CF    # SERVICE_CF[svc]="/path/to/compose.yml"
+verify_sqlite_backup() {
+    local gz_file="$1"
+    local dest_dir="$2"
+    local db_name="$3"
+    local warn_msg=""
+
+    # Check 1 — gzip integrity
+    if ! gzip -t "$gz_file" 2>/dev/null; then
+        echo "FAIL:gzip corrupt"
+        return 1
+    fi
+
+    # Check 2 — SQLite integrity_check
+    local tmp_db
+    tmp_db=$(mktemp /tmp/dabs_verify_XXXXXX.db)
+    if ! zcat "$gz_file" > "$tmp_db" 2>/dev/null; then
+        rm -f "$tmp_db"
+        echo "FAIL:decompress error"
+        return 1
+    fi
+
+    local integrity
+    integrity=$(sqlite3 "$tmp_db" "PRAGMA integrity_check;" 2>/dev/null)
+    rm -f "$tmp_db"
+
+    if [ "$integrity" != "ok" ]; then
+        echo "FAIL:integrity_check failed"
+        return 1
+    fi
+
+    # Check 3 — size drop vs previous backup
+    local curr_size
+    curr_size=$(stat -c%s "$gz_file" 2>/dev/null || echo 0)
+
+    # Find the most recent previous backup for this db (exclude current file)
+    local prev_backup
+    prev_backup=$(find "$dest_dir" -name "${db_name}_*.gz" \
+        ! -newer "$gz_file" ! -samefile "$gz_file" \
+        -not -name "*-wal*" -not -name "*-shm*" \
+        2>/dev/null | sort | tail -1)
+
+    if [ -n "$prev_backup" ]; then
+        local prev_size
+        prev_size=$(stat -c%s "$prev_backup" 2>/dev/null || echo 0)
+        if [ "$prev_size" -gt 0 ]; then
+            local threshold=$(( prev_size * (100 - SIZE_DROP_WARN) / 100 ))
+            if [ "$curr_size" -lt "$threshold" ]; then
+                local prev_h curr_h
+                prev_h=$(du -h "$prev_backup" | cut -f1)
+                curr_h=$(du -h "$gz_file" | cut -f1)
+                echo "WARN:size drop ${prev_h}→${curr_h}"
+                return 0
+            fi
+        fi
+    fi
+
+    echo "OK"
+    return 0
+}
+
+# ==============================================================================
+# PHASE 1 — SCAN
+# ==============================================================================
+declare -A SERVICE_DBS
+declare -A SERVICE_CF
 
 mapfile -t COMPOSE_FILES < <(
     find "$BASE_DIR" -type f \( -name "compose.y*ml" -o -name "docker-compose.y*ml" \) \
     -not -path "$BACKUP_ROOT/*"
 )
 
-if [ ${#COMPOSE_FILES[@]} -eq 0 ]; then
-    echo "[!] No compose files found under $BASE_DIR"
-fi
+[ ${#COMPOSE_FILES[@]} -eq 0 ] && echo "[!] No compose files found under $BASE_DIR"
 
-# Cache mounts to avoid repeated docker inspect calls per database
-declare -A CID_SVC    # CID_SVC[cid]=service_name
-declare -A CID_MOUNTS # CID_MOUNTS[cid]="src1\nsrc2\n..."
+declare -A CID_SVC
+declare -A CID_MOUNTS
 while IFS= read -r cid; do
     SVC=$(docker inspect "$cid" --format '{{index .Config.Labels "com.docker.compose.service"}}' 2>/dev/null)
     [ -z "$SVC" ] && continue
@@ -127,7 +190,6 @@ for cf in "${COMPOSE_FILES[@]}"; do
         [[ -n "${SEEN_DBS[$db_path]}" ]] && continue
         SEEN_DBS[$db_path]=1
 
-        # Verify SQLite header
         if ! file "$db_path" | grep -q "SQLite 3.x database"; then
             echo "[~] Skipped (not SQLite): $db_path"
             continue
@@ -138,7 +200,6 @@ for cf in "${COMPOSE_FILES[@]}"; do
             continue
         fi
 
-        # Find the service mounting this db — longest matching source wins
         SERVICE_NAME=""
         BEST_LEN=0
         for cid in "${!CID_SVC[@]}"; do
@@ -159,7 +220,6 @@ for cf in "${COMPOSE_FILES[@]}"; do
             continue
         fi
 
-        # Skip excluded services
         if [ ${#EXCLUDED_SERVICES[@]} -gt 0 ] && printf '%s\n' "${EXCLUDED_SERVICES[@]}" | grep -qx "$SERVICE_NAME"; then
             echo "[~] Skipped (excluded): $SERVICE_NAME → $(basename "$db_path")"
             continue
@@ -171,7 +231,7 @@ for cf in "${COMPOSE_FILES[@]}"; do
 done
 
 # ==============================================================================
-# PHASE 2 — BACKUP: one stop/start per service
+# PHASE 2 — BACKUP + VERIFY
 # ==============================================================================
 for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
     cf="${SERVICE_CF[$SERVICE_NAME]}"
@@ -196,45 +256,69 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
 
         echo "    → $DB_NAME ($DB_SIZE)"
 
+        ROW_BACKUP_COLOR="#d4edda"
+        ROW_BACKUP_ICON="✅"
+        ROW_BACKUP_STATUS="OK"
+        ROW_VERIFY_COLOR="#d4edda"
+        ROW_VERIFY_ICON="✅"
+        ROW_VERIFY_STATUS="OK"
+
         if [ "$DRY_RUN" == "off" ]; then
             DEST_BASE="$DEST_DIR/${DB_NAME}_${DATE_ID}"
 
             if gzip -c "$db_path" > "${DEST_BASE}.gz" 2>/dev/null; then
-                echo "      OK → ${DEST_BASE}.gz"
-                if [ -f "${db_path}-wal" ]; then
-                    gzip -c "${db_path}-wal" > "${DEST_BASE}-wal.gz"
-                    echo "      OK → ${DEST_BASE}-wal.gz"
-                fi
-                if [ -f "${db_path}-shm" ]; then
-                    gzip -c "${db_path}-shm" > "${DEST_BASE}-shm.gz"
-                    echo "      OK → ${DEST_BASE}-shm.gz"
-                fi
-                ROW_COLOR="#d4edda"
-                ROW_ICON="✅"
-                ROW_STATUS="OK"
+                echo "      Backup OK → ${DEST_BASE}.gz"
+                [ -f "${db_path}-wal" ] && gzip -c "${db_path}-wal" > "${DEST_BASE}-wal.gz" && echo "      Backup OK → ${DEST_BASE}-wal.gz"
+                [ -f "${db_path}-shm" ] && gzip -c "${db_path}-shm" > "${DEST_BASE}-shm.gz" && echo "      Backup OK → ${DEST_BASE}-shm.gz"
                 ((COUNT_OK++))
+
+                # --- VERIFY ---
+                echo "      Verifying ${DB_NAME}..."
+                VERIFY_RESULT=$(verify_sqlite_backup "${DEST_BASE}.gz" "$DEST_DIR" "$DB_NAME")
+                VERIFY_CODE="${VERIFY_RESULT%%:*}"
+                VERIFY_DETAIL="${VERIFY_RESULT#*:}"
+
+                case "$VERIFY_CODE" in
+                    OK)
+                        echo "      Verify OK"
+                        ((COUNT_VERIFY_OK++))
+                        ROW_VERIFY_COLOR="#d4edda"; ROW_VERIFY_ICON="✅"; ROW_VERIFY_STATUS="OK"
+                        ;;
+                    WARN)
+                        echo "      Verify WARN: $VERIFY_DETAIL"
+                        ((COUNT_VERIFY_WARN++))
+                        ROW_VERIFY_COLOR="#fff3cd"; ROW_VERIFY_ICON="⚠️"; ROW_VERIFY_STATUS="WARN: $VERIFY_DETAIL"
+                        [ "$GLOBAL_STATUS" == "OK" ] && GLOBAL_STATUS="WARN"
+                        ;;
+                    FAIL)
+                        echo "      Verify FAIL: $VERIFY_DETAIL"
+                        ((COUNT_VERIFY_ERR++))
+                        ROW_VERIFY_COLOR="#f8d7da"; ROW_VERIFY_ICON="❌"; ROW_VERIFY_STATUS="FAIL: $VERIFY_DETAIL"
+                        GLOBAL_STATUS="ERROR"
+                        ;;
+                esac
+
             else
                 echo "      ERROR: failed to compress $db_path"
                 rm -f "${DEST_BASE}.gz"
-                ROW_COLOR="#f8d7da"
-                ROW_ICON="❌"
-                ROW_STATUS="ERROR"
+                ROW_BACKUP_COLOR="#f8d7da"; ROW_BACKUP_ICON="❌"; ROW_BACKUP_STATUS="ERROR"
+                ROW_VERIFY_COLOR="#f2f2f2"; ROW_VERIFY_ICON="—"; ROW_VERIFY_STATUS="skipped"
                 GLOBAL_STATUS="ERROR"
                 ((COUNT_ERR++))
             fi
         else
-            ROW_COLOR="#fff3cd"
-            ROW_ICON="⚠️"
-            ROW_STATUS="DRY-RUN"
+            ROW_BACKUP_COLOR="#fff3cd"; ROW_BACKUP_ICON="⚠️"; ROW_BACKUP_STATUS="DRY-RUN"
+            ROW_VERIFY_COLOR="#fff3cd"; ROW_VERIFY_ICON="⚠️"; ROW_VERIFY_STATUS="DRY-RUN"
             ((COUNT_DRY++))
         fi
 
         TABLE_ROWS+="
-        <tr style='background-color: ${ROW_COLOR};'>
+        <tr>
             <td style='padding: 8px; border: 1px solid #ddd;'>$SERVICE_NAME</td>
             <td style='padding: 8px; border: 1px solid #ddd;'>$DB_NAME</td>
             <td style='padding: 8px; border: 1px solid #ddd;'>$DB_SIZE</td>
-            <td style='padding: 8px; border: 1px solid #ddd; text-align:center;'>${ROW_ICON} ${ROW_STATUS}</td>
+            <td style='padding: 8px; border: 1px solid #ddd; text-align:center; background-color:${ROW_BACKUP_COLOR};'>${ROW_BACKUP_ICON} ${ROW_BACKUP_STATUS}</td>
+            <td style='padding: 8px; border: 1px solid #ddd; text-align:center; background-color:${ROW_VERIFY_COLOR};'>${ROW_VERIFY_ICON} ${ROW_VERIFY_STATUS}</td>
         </tr>"
     done
 
@@ -245,9 +329,7 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
 done
 
 # ==============================================================================
-# RETENTION — safe cleanup
-# Only touches .gz files inside BACKUP_ROOT, never rm -rf on directories.
-# -mtime +N-1 matches files older than N days, keeping exactly RETENTION_DAYS days.
+# RETENTION
 # ==============================================================================
 echo ""
 echo "[*] Removing backups older than $RETENTION_DAYS days..."
@@ -258,33 +340,24 @@ while IFS= read -r -d '' old_file; do
     rm -f "$old_file"
     ((DELETED_COUNT++))
 done < <(
-    find "$BACKUP_ROOT" \
-        -type f -name "*.gz" \
+    find "$BACKUP_ROOT" -type f -name "*.gz" \
         -not -path "*/log/*" \
-        -mtime +"$((RETENTION_DAYS - 1))" \
-        -print0
+        -mtime +"$((RETENTION_DAYS - 1))" -print0
 )
-
 echo "    Removed $DELETED_COUNT file(s)."
 
-# Remove empty service directories left after retention (safe — not recursive rm -rf)
 find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -not -name "log" -empty -delete
 
-# Log retention
 echo "[*] Removing logs older than $RETENTION_DAYS days..."
-
 DELETED_LOGS=0
 while IFS= read -r -d '' old_log; do
     echo "    Removing log: $old_log"
     rm -f "$old_log"
     ((DELETED_LOGS++))
 done < <(
-    find "$LOG_DIR" \
-        -type f -name "*.log" \
-        -mtime +"$((RETENTION_DAYS - 1))" \
-        -print0
+    find "$LOG_DIR" -type f -name "*.log" \
+        -mtime +"$((RETENTION_DAYS - 1))" -print0
 )
-
 echo "    Removed $DELETED_LOGS log(s)."
 
 # ==============================================================================
@@ -292,6 +365,7 @@ echo "    Removed $DELETED_LOGS log(s)."
 # ==============================================================================
 case "$GLOBAL_STATUS" in
     OK)    STATUS_ICON="✅" ;;
+    WARN)  STATUS_ICON="⚠️" ;;
     ERROR) STATUS_ICON="❌" ;;
     *)     STATUS_ICON="⚠️" ;;
 esac
@@ -304,7 +378,8 @@ fi
 
 if [ "$DRY_RUN" == "off" ]; then
     TOTAL=$((COUNT_OK + COUNT_ERR))
-    SUMMARY_LINE="Databases processed: <b>${TOTAL}</b> &nbsp;|&nbsp; ✅ OK: <b>${COUNT_OK}</b> &nbsp;|&nbsp; ❌ Errors: <b>${COUNT_ERR}</b>"
+    SUMMARY_LINE="Databases: <b>${TOTAL}</b> &nbsp;|&nbsp; Backup ✅ <b>${COUNT_OK}</b> ❌ <b>${COUNT_ERR}</b>"
+    SUMMARY_LINE+="<br>Verify ✅ <b>${COUNT_VERIFY_OK}</b> ⚠️ <b>${COUNT_VERIFY_WARN}</b> ❌ <b>${COUNT_VERIFY_ERR}</b>"
     [ $DELETED_COUNT -gt 0 ] && SUMMARY_LINE+="<br>Backups removed by retention: <b>${DELETED_COUNT}</b>"
     [ $DELETED_LOGS -gt 0 ]  && SUMMARY_LINE+="<br>Logs removed by retention: <b>${DELETED_LOGS}</b>"
 else
@@ -312,16 +387,14 @@ else
 fi
 
 EXCLUSIONS_LINE=""
-if [ ${#EXCLUDED_SERVICES[@]} -gt 0 ]; then
-    EXCLUSIONS_LINE="<br><strong>Excluded services:</strong> ${EXCLUDED_SERVICES[*]}"
-fi
+[ ${#EXCLUDED_SERVICES[@]} -gt 0 ] && EXCLUSIONS_LINE="<br><strong>Excluded services:</strong> ${EXCLUDED_SERVICES[*]}"
 
 if [ -z "$TABLE_ROWS" ]; then
-    TABLE_ROWS="<tr><td colspan='4' style='padding: 12px; text-align:center; color:#888;'>No SQLite databases found associated with running containers.</td></tr>"
+    TABLE_ROWS="<tr><td colspan='5' style='padding: 12px; text-align:center; color:#888;'>No SQLite databases found associated with running containers.</td></tr>"
 fi
 
 HTML_BODY="<html>
-<body style='font-family: Arial, sans-serif; color: #333; max-width: 700px; margin: 0 auto;'>
+<body style='font-family: Arial, sans-serif; color: #333; max-width: 750px; margin: 0 auto;'>
 
 <h2 style='border-bottom: 2px solid #eee; padding-bottom: 8px;'>${EMAIL_SUBJECT_PREFIX}</h2>
 
@@ -341,7 +414,8 @@ HTML_BODY="<html>
             <th style='padding: 9px 8px; border: 1px solid #ddd; text-align:left;'>Service</th>
             <th style='padding: 9px 8px; border: 1px solid #ddd; text-align:left;'>Database</th>
             <th style='padding: 9px 8px; border: 1px solid #ddd; text-align:left;'>Size</th>
-            <th style='padding: 9px 8px; border: 1px solid #ddd; text-align:center;'>Status</th>
+            <th style='padding: 9px 8px; border: 1px solid #ddd; text-align:center;'>Backup</th>
+            <th style='padding: 9px 8px; border: 1px solid #ddd; text-align:center;'>Verify</th>
         </tr>
     </thead>
     <tbody>
@@ -351,7 +425,8 @@ HTML_BODY="<html>
 
 <p style='font-size: 11px; color: #aaa; margin-top: 24px;'>
     Log: ${LOG_FILE}<br>
-    Retention: ${RETENTION_DAYS} days &nbsp;|&nbsp; Backups at: ${BACKUP_ROOT}
+    Retention: ${RETENTION_DAYS} days &nbsp;|&nbsp; Backups at: ${BACKUP_ROOT}<br>
+    Verify: gzip integrity + PRAGMA integrity_check + size trend (warn if drop &gt; ${SIZE_DROP_WARN}%)
 </p>
 
 </body>
@@ -359,10 +434,6 @@ HTML_BODY="<html>
 
 # ==============================================================================
 # SEND EMAIL VIA SWAKS
-# TLS selected automatically by port:
-#   465 → --tls-on-connect (SMTPS)
-#   587 → --tls (STARTTLS)
-#   other → no TLS flag
 # ==============================================================================
 case "$SMTP_PORT" in
     465) SWAKS_TLS="--tls-on-connect" ;;
@@ -371,9 +442,7 @@ case "$SMTP_PORT" in
 esac
 
 SWAKS_AUTH=()
-if [[ -n "$SMTP_USER" ]]; then
-    SWAKS_AUTH=(--auth-user "$SMTP_USER" --auth-password "$SMTP_PASS")
-fi
+[[ -n "$SMTP_USER" ]] && SWAKS_AUTH=(--auth-user "$SMTP_USER" --auth-password "$SMTP_PASS")
 
 echo ""
 echo "[*] Sending report to $EMAIL_TO..."
