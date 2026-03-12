@@ -1,6 +1,6 @@
 # DABS — Docker Automated Backup for SQLite
 
-**Project Status**: Active | **Version**: 1.1 | **Maintained**: Yes
+**Project Status**: Active | **Version**: 1.2 | **Maintained**: Yes
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker](https://img.shields.io/badge/docker-required-blue.svg)](https://www.docker.com/)
@@ -20,6 +20,7 @@ Automatic SQLite backup script for Docker environments. Discovers SQLite databas
 - **Backup verification** — every backup is verified immediately after creation (see below)
 - **Retention** — auto-deletes backups and logs older than `RETENTION_DAYS`
 - **Email report** — color-coded HTML email with separate Backup and Verify columns per database
+- **Push notifications** — optional Telegram and ntfy alerts, fully independent from each other and from email
 - **Dry-run mode** — scan and report without touching anything
 - **Exclusion list** — skip specific services by name
 - **Auto-install** — installs missing dependencies via `apt-get` on first run
@@ -28,7 +29,7 @@ Automatic SQLite backup script for Docker environments. Discovers SQLite databas
 
 ## How Verification Works
 
-After each backup is created, DABS runs three checks in sequence. A backup must pass all three to be marked ✅ OK.
+After each backup is created, DABS runs three checks in sequence. A backup must pass all three to be marked OK.
 
 **1. gzip integrity**
 Runs `gzip -t` on the `.gz` file. Catches truncated or corrupt archives produced by write errors or disk issues.
@@ -37,18 +38,16 @@ Runs `gzip -t` on the `.gz` file. Catches truncated or corrupt archives produced
 Decompresses the backup to a temporary file and runs `PRAGMA integrity_check` via `sqlite3`. This is SQLite's built-in consistency check — it verifies the B-tree structure, page consistency, and internal pointers. Returns `ok` if the database is intact. The temp file is deleted immediately after.
 
 **3. Size trend**
-Compares the size of the new backup against the most recent previous backup for the same database. If the new file is smaller by more than `SIZE_DROP_WARN`% (default: 20%), the verify is marked ⚠️ WARN with the old and new sizes shown. This catches silent data loss — for example a service that truncated its database or a misconfiguration that wiped tables.
+Compares the size of the new backup against the most recent previous backup for the same database. If the new file is smaller by more than `SIZE_DROP_WARN`% (default: 20%), the verify is marked WARN with the old and new sizes shown. This catches silent data loss — for example a service that truncated its database or a misconfiguration that wiped tables.
 
 ### Verify vs Backup status in the email
 
-The email report has two separate columns per database row:
-
 | Backup | Verify | Meaning |
 |--------|--------|---------|
-| ✅ OK | ✅ OK | Backup written and verified clean |
-| ✅ OK | ⚠️ WARN | Backup valid but size dropped unexpectedly — investigate |
-| ✅ OK | ❌ FAIL | Backup written but corrupt — do not rely on it |
-| ❌ ERROR | — skipped | Backup failed, verify not attempted |
+| OK | OK | Backup written and verified clean |
+| OK | WARN | Backup valid but size dropped unexpectedly — investigate |
+| OK | FAIL | Backup written but corrupt — do not rely on it |
+| ERROR | skipped | Backup failed, verify not attempted |
 
 A WARN does not block the process — the backup is kept and the service continues. A FAIL sets the global status to ERROR and is highlighted in the email subject.
 
@@ -86,9 +85,51 @@ SMTP_PASS=""
 EMAIL_FROM="dabs@example.com"
 EMAIL_TO="admin@example.com"
 EMAIL_SUBJECT_PREFIX="SQLite Backup"
+
+# Telegram (optional)
+TELEGRAM_ENABLED="false"
+TELEGRAM_TOKEN=""
+TELEGRAM_CHAT_ID=""
+
+# ntfy (optional)
+NTFY_ENABLED="false"
+NTFY_URL=""             # e.g. https://ntfy.sh or your self-hosted instance
+NTFY_TOPIC=""           # e.g. dabs-backups
+
+# Attach log to push notifications
+NOTIFY_ATTACH_LOG="false"
 ```
 
 > **TLS is selected automatically by port**: 465 → SMTPS, 587 → STARTTLS, anything else → plain.
+
+---
+
+## Notifications
+
+DABS supports three independent notification channels. Each can be enabled or disabled without affecting the others.
+
+### Email
+
+Full HTML report with color-coded table, per-database Backup and Verify status. Best for detailed post-run review.
+
+### Telegram
+
+Compact message sent to a bot or channel. Requires a bot token and chat ID.
+
+Example message:
+```
+DABS Backup — myserver | 2025-01-15 03:00
+SQLite 3 OK 0 ERR (total: 3)
+Verify 3 OK 0 WARN 0 ERR
+```
+
+### ntfy
+
+Sends a push notification to any ntfy-compatible client (ntfy.sh or self-hosted). Priority is set automatically: default on success, urgent on any backup or verify error.
+
+### Log attachment
+
+Set `NOTIFY_ATTACH_LOG="true"` to attach the current day's log file to both Telegram and ntfy notifications. Useful to inspect errors directly from the phone without opening SSH.
 
 ---
 
@@ -142,11 +183,17 @@ Then combine it with a KDD Action inside a **Komodo Procedure** for full databas
 5. For each service: stops it → compresses all its databases with `gzip` → restarts it
 6. Verifies each backup: gzip integrity + `PRAGMA integrity_check` + size trend
 7. Applies retention policy — removes old `.gz` files and logs
-8. Sends a color-coded HTML email report with Backup and Verify status per database
+8. Sends email report, Telegram message, and/or ntfy alert — each independently
 
 ---
 
 ## Changelog
+
+### v1.2
+- Added Telegram push notifications (independent of email and ntfy)
+- Added ntfy push notifications (independent of email and Telegram)
+- Added `NOTIFY_ATTACH_LOG` option to attach the daily log to push notifications
+- ntfy priority set to urgent automatically on backup or verify errors
 
 ### v1.1
 - Added backup verification (gzip integrity, `PRAGMA integrity_check`, size trend)
