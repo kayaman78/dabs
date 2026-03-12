@@ -68,7 +68,7 @@ Dependencies installed automatically if missing: `file`, `jq`, `swaks`, `gzip`, 
 All settings are at the top of the script.
 
 ```bash
-DRY_RUN="off"                          # "on" to simulate without writing anything
+DRY_RUN="off"                          # "on" to simulate without writing anything. use this at first attempt
 BASE_DIR="/srv/docker"                 # Root directory to scan for compose files
 BACKUP_ROOT="/srv/docker/dabs/backups" # Root directory where backups will be stored
 RETENTION_DAYS=7                       # How many days to keep backups and logs
