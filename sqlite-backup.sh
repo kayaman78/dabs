@@ -29,6 +29,19 @@ EMAIL_FROM="dabs@example.com"
 EMAIL_TO="admin@example.com"
 EMAIL_SUBJECT_PREFIX="SQLite Backup"
 
+# Telegram (optional)
+TELEGRAM_ENABLED="false"
+TELEGRAM_TOKEN=""
+TELEGRAM_CHAT_ID=""
+
+# ntfy (optional)
+NTFY_ENABLED="false"
+NTFY_URL=""           # e.g. https://ntfy.sh or your self-hosted instance
+NTFY_TOPIC=""         # e.g. dabs-backups
+
+# Attach log to push notifications
+NOTIFY_ATTACH_LOG="false"
+
 # ==============================================================================
 # INITIAL CHECKS
 # ==============================================================================
@@ -154,6 +167,84 @@ verify_sqlite_backup() {
 
     echo "OK"
     return 0
+}
+
+# ==============================================================================
+# NOTIFICATION FUNCTIONS
+# Each channel is fully independent. All use the same compact text summary.
+# ==============================================================================
+
+build_text_summary() {
+    local icon="✅"
+    [ $COUNT_ERR -gt 0 ] && icon="❌"
+    [ $COUNT_ERR -eq 0 ] && [ $COUNT_VERIFY_WARN -gt 0 ] && icon="⚠️"
+    [ $COUNT_VERIFY_ERR -gt 0 ] && icon="❌"
+
+    local total=$((COUNT_OK + COUNT_ERR))
+    printf "%s DABS Backup — %s | %s\nSQLite %s✅ %s❌ (total: %s)\nVerify %s✅ %s⚠️ %s❌" \
+        "$icon" "$HOSTNAME" "$DATE_LABEL" \
+        "$COUNT_OK" "$COUNT_ERR" "$total" \
+        "$COUNT_VERIFY_OK" "$COUNT_VERIFY_WARN" "$COUNT_VERIFY_ERR"
+}
+
+send_telegram() {
+    [ "$TELEGRAM_ENABLED" != "true" ] && return 0
+    if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+        echo "WARNING: Telegram enabled but TOKEN or CHAT_ID missing — skipping"
+        return 1
+    fi
+
+    local text api
+    text=$(build_text_summary)
+    api="https://api.telegram.org/bot${TELEGRAM_TOKEN}"
+
+    if [ "$NOTIFY_ATTACH_LOG" = "true" ] && [ -f "$LOG_FILE" ]; then
+        curl -sf -X POST "${api}/sendDocument" \
+            -F "chat_id=${TELEGRAM_CHAT_ID}" \
+            -F "caption=${text}" \
+            -F "document=@${LOG_FILE}" \
+            > /dev/null 2>&1 \
+            && echo "    Telegram: sent with log attachment." \
+            || echo "    WARNING: Telegram delivery failed."
+    else
+        curl -sf -X POST "${api}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"${text}\"}" \
+            > /dev/null 2>&1 \
+            && echo "    Telegram: sent." \
+            || echo "    WARNING: Telegram delivery failed."
+    fi
+}
+
+send_ntfy() {
+    [ "$NTFY_ENABLED" != "true" ] && return 0
+    if [ -z "$NTFY_URL" ] || [ -z "$NTFY_TOPIC" ]; then
+        echo "WARNING: ntfy enabled but URL or TOPIC missing — skipping"
+        return 1
+    fi
+
+    local text priority=3
+    text=$(build_text_summary)
+    { [ $COUNT_ERR -gt 0 ] || [ $COUNT_VERIFY_ERR -gt 0 ]; } && priority=5
+
+    if [ "$NOTIFY_ATTACH_LOG" = "true" ] && [ -f "$LOG_FILE" ]; then
+        curl -sf -X PUT "${NTFY_URL}/${NTFY_TOPIC}" \
+            -H "Title: DABS Backup — ${HOSTNAME}" \
+            -H "Priority: ${priority}" \
+            -H "Filename: $(basename "$LOG_FILE")" \
+            --data-binary "@${LOG_FILE}" \
+            > /dev/null 2>&1 \
+            && echo "    ntfy: sent with log attachment." \
+            || echo "    WARNING: ntfy delivery failed."
+    else
+        curl -sf -X POST "${NTFY_URL}/${NTFY_TOPIC}" \
+            -H "Title: DABS Backup — ${HOSTNAME}" \
+            -H "Priority: ${priority}" \
+            -d "$text" \
+            > /dev/null 2>&1 \
+            && echo "    ntfy: sent." \
+            || echo "    WARNING: ntfy delivery failed."
+    fi
 }
 
 # ==============================================================================
@@ -460,6 +551,11 @@ swaks \
     > /dev/null 2>&1 \
     && echo "    Report sent." \
     || echo "    WARNING: email delivery failed (check SMTP settings)."
+
+echo ""
+echo "[*] Sending push notifications..."
+send_telegram
+send_ntfy
 
 echo ""
 echo "============================================================"
