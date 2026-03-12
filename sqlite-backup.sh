@@ -73,7 +73,7 @@ for cmd in "${!DEP_MAP[@]}"; do
 done
 
 if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
-    echo "[*] Installing missing dependencies: ${MISSING_PKGS[*]}"
+    echo "⚙️  Installing missing dependencies: ${MISSING_PKGS[*]}"
     apt-get update -qq && apt-get install -y -qq "${MISSING_PKGS[@]}"
 fi
 
@@ -95,7 +95,7 @@ COUNT_VERIFY_WARN=0
 COUNT_VERIFY_ERR=0
 
 echo "============================================================"
-echo "START SQLite Backup: $(date) — Host: $HOSTNAME"
+echo "🚀 START SQLite Backup: $(date) — Host: $HOSTNAME"
 echo "Mode: $([ "$DRY_RUN" == "on" ] && echo "DRY-RUN (no backup will be written)" || echo "PRODUCTION")"
 [ ${#EXCLUDED_SERVICES[@]} -gt 0 ] && echo "Excluded services: ${EXCLUDED_SERVICES[*]}"
 echo "============================================================"
@@ -190,7 +190,7 @@ build_text_summary() {
 send_telegram() {
     [ "$TELEGRAM_ENABLED" != "true" ] && return 0
     if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-        echo "WARNING: Telegram enabled but TOKEN or CHAT_ID missing — skipping"
+        echo "⚠️  WARNING: Telegram enabled but TOKEN or CHAT_ID missing — skipping"
         return 1
     fi
 
@@ -204,22 +204,22 @@ send_telegram() {
             -F "caption=${text}" \
             -F "document=@${LOG_FILE}" \
             > /dev/null 2>&1 \
-            && echo "    Telegram: sent with log attachment." \
-            || echo "    WARNING: Telegram delivery failed."
+            && echo "    📨 Telegram: sent with log attachment." \
+            || echo "    ⚠️  WARNING: Telegram delivery failed."
     else
         curl -sf -X POST "${api}/sendMessage" \
             -H "Content-Type: application/json" \
             -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"${text}\"}" \
             > /dev/null 2>&1 \
-            && echo "    Telegram: sent." \
-            || echo "    WARNING: Telegram delivery failed."
+            && echo "    📨 Telegram: sent." \
+            || echo "    ⚠️  WARNING: Telegram delivery failed."
     fi
 }
 
 send_ntfy() {
     [ "$NTFY_ENABLED" != "true" ] && return 0
     if [ -z "$NTFY_URL" ] || [ -z "$NTFY_TOPIC" ]; then
-        echo "WARNING: ntfy enabled but URL or TOPIC missing — skipping"
+        echo "⚠️  WARNING: ntfy enabled but URL or TOPIC missing — skipping"
         return 1
     fi
 
@@ -234,16 +234,16 @@ send_ntfy() {
             -H "Filename: $(basename "$LOG_FILE")" \
             --data-binary "@${LOG_FILE}" \
             > /dev/null 2>&1 \
-            && echo "    ntfy: sent with log attachment." \
-            || echo "    WARNING: ntfy delivery failed."
+            && echo "    📨 ntfy: sent with log attachment." \
+            || echo "    ⚠️  WARNING: ntfy delivery failed."
     else
         curl -sf -X POST "${NTFY_URL}/${NTFY_TOPIC}" \
             -H "Title: DABS Backup — ${HOSTNAME}" \
             -H "Priority: ${priority}" \
             -d "$text" \
             > /dev/null 2>&1 \
-            && echo "    ntfy: sent." \
-            || echo "    WARNING: ntfy delivery failed."
+            && echo "    📨 ntfy: sent." \
+            || echo "    ⚠️  WARNING: ntfy delivery failed."
     fi
 }
 
@@ -282,12 +282,12 @@ for cf in "${COMPOSE_FILES[@]}"; do
         SEEN_DBS[$db_path]=1
 
         if ! file "$db_path" | grep -q "SQLite 3.x database"; then
-            echo "[~] Skipped (not SQLite): $db_path"
+            echo "[~] ⏭️  Skipped (not SQLite): $db_path"
             continue
         fi
 
         if [ ${#CID_SVC[@]} -eq 0 ]; then
-            echo "[~] Skipped (no running containers): $db_path"
+            echo "[~] ⏭️  Skipped (no running containers): $db_path"
             continue
         fi
 
@@ -307,12 +307,12 @@ for cf in "${COMPOSE_FILES[@]}"; do
         done
 
         if [ -z "$SERVICE_NAME" ] || [ "$SERVICE_NAME" == "null" ]; then
-            echo "[~] Skipped (no active container mounts this path): $db_path"
+            echo "[~] ⏭️  Skipped (no active container mounts this path): $db_path"
             continue
         fi
 
         if [ ${#EXCLUDED_SERVICES[@]} -gt 0 ] && printf '%s\n' "${EXCLUDED_SERVICES[@]}" | grep -qx "$SERVICE_NAME"; then
-            echo "[~] Skipped (excluded): $SERVICE_NAME → $(basename "$db_path")"
+            echo "[~] ⏭️  Skipped (excluded): $SERVICE_NAME → $(basename "$db_path")"
             continue
         fi
 
@@ -331,10 +331,10 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
 
     DB_COUNT=${#DB_LIST[@]}
     echo ""
-    echo "[*] Service: $SERVICE_NAME — $DB_COUNT database(s) to back up"
+    echo "[*] 🗄️  Service: $SERVICE_NAME — $DB_COUNT database(s) to back up"
 
     if [ "$DRY_RUN" == "off" ]; then
-        echo "    Stopping $SERVICE_NAME..."
+        echo "    ⏸️  Stopping $SERVICE_NAME..."
         docker compose -f "$cf" stop -t "$STOP_TIMEOUT" "$SERVICE_NAME"
     fi
 
@@ -358,31 +358,31 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
             DEST_BASE="$DEST_DIR/${DB_NAME}_${DATE_ID}"
 
             if gzip -c "$db_path" > "${DEST_BASE}.gz" 2>/dev/null; then
-                echo "      Backup OK → ${DEST_BASE}.gz"
+                echo "      ✅ Backup OK → ${DEST_BASE}.gz"
                 [ -f "${db_path}-wal" ] && gzip -c "${db_path}-wal" > "${DEST_BASE}-wal.gz" && echo "      Backup OK → ${DEST_BASE}-wal.gz"
                 [ -f "${db_path}-shm" ] && gzip -c "${db_path}-shm" > "${DEST_BASE}-shm.gz" && echo "      Backup OK → ${DEST_BASE}-shm.gz"
                 ((COUNT_OK++))
 
                 # --- VERIFY ---
-                echo "      Verifying ${DB_NAME}..."
+                echo "      🔍 Verifying ${DB_NAME}..."
                 VERIFY_RESULT=$(verify_sqlite_backup "${DEST_BASE}.gz" "$DEST_DIR" "$DB_NAME")
                 VERIFY_CODE="${VERIFY_RESULT%%:*}"
                 VERIFY_DETAIL="${VERIFY_RESULT#*:}"
 
                 case "$VERIFY_CODE" in
                     OK)
-                        echo "      Verify OK"
+                        echo "      ✅ Verify OK"
                         ((COUNT_VERIFY_OK++))
                         ROW_VERIFY_COLOR="#d4edda"; ROW_VERIFY_ICON="✅"; ROW_VERIFY_STATUS="OK"
                         ;;
                     WARN)
-                        echo "      Verify WARN: $VERIFY_DETAIL"
+                        echo "      ⚠️  Verify WARN: $VERIFY_DETAIL"
                         ((COUNT_VERIFY_WARN++))
                         ROW_VERIFY_COLOR="#fff3cd"; ROW_VERIFY_ICON="⚠️"; ROW_VERIFY_STATUS="WARN: $VERIFY_DETAIL"
                         [ "$GLOBAL_STATUS" == "OK" ] && GLOBAL_STATUS="WARN"
                         ;;
                     FAIL)
-                        echo "      Verify FAIL: $VERIFY_DETAIL"
+                        echo "      ❌ Verify FAIL: $VERIFY_DETAIL"
                         ((COUNT_VERIFY_ERR++))
                         ROW_VERIFY_COLOR="#f8d7da"; ROW_VERIFY_ICON="❌"; ROW_VERIFY_STATUS="FAIL: $VERIFY_DETAIL"
                         GLOBAL_STATUS="ERROR"
@@ -390,7 +390,7 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
                 esac
 
             else
-                echo "      ERROR: failed to compress $db_path"
+                echo "      ❌ ERROR: failed to compress $db_path"
                 rm -f "${DEST_BASE}.gz"
                 ROW_BACKUP_COLOR="#f8d7da"; ROW_BACKUP_ICON="❌"; ROW_BACKUP_STATUS="ERROR"
                 ROW_VERIFY_COLOR="#f2f2f2"; ROW_VERIFY_ICON="—"; ROW_VERIFY_STATUS="skipped"
@@ -414,7 +414,7 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
     done
 
     if [ "$DRY_RUN" == "off" ]; then
-        echo "    Starting $SERVICE_NAME..."
+        echo "    ▶️  Starting $SERVICE_NAME..."
         docker compose -f "$cf" start "$SERVICE_NAME"
     fi
 done
@@ -553,7 +553,7 @@ swaks \
     || echo "    WARNING: email delivery failed (check SMTP settings)."
 
 echo ""
-echo "[*] Sending push notifications..."
+echo "[*] 📣 Sending push notifications..."
 send_telegram
 send_ntfy
 
