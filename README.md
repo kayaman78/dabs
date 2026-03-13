@@ -8,7 +8,7 @@
 
 Automatic SQLite backup script for Docker environments. Discovers SQLite databases mounted by running containers, stops each service briefly, creates compressed backups, restarts the service, and immediately verifies the backup integrity. Sends an HTML email report on completion.
 
-> Part of the **KDD ecosystem** — see also [KDD](https://github.com/kayaman78/kdd) for MySQL / PostgreSQL / MongoDB backups and [KCR](https://github.com/kayaman78/kcr) to run DABS from a Komodo Action.
+> Part of the **KDD ecosystem** — see also [KDD](https://github.com/kayaman78/kdd) for MySQL / PostgreSQL / MongoDB, [DABV](https://github.com/kayaman78/dabv) for Docker volumes, and [KCR](https://github.com/kayaman78/kcr) to run DABS from a Komodo Action.
 
 ---
 
@@ -68,7 +68,7 @@ Dependencies installed automatically if missing: `file`, `jq`, `swaks`, `gzip`, 
 All settings are at the top of the script.
 
 ```bash
-DRY_RUN="off"                          # "on" to simulate without writing anything. use this at first attempt
+DRY_RUN="off"                          # "on" to simulate without writing anything
 BASE_DIR="/srv/docker"                 # Root directory to scan for compose files
 BACKUP_ROOT="/srv/docker/dabs/backups" # Root directory where backups will be stored
 RETENTION_DAYS=7                       # How many days to keep backups and logs
@@ -170,7 +170,7 @@ Use [KCR](https://github.com/kayaman78/kcr) to trigger DABS directly from a Komo
 }
 ```
 
-Then combine it with a KDD Action inside a **Komodo Procedure** for full database coverage in one scheduled job.
+Then combine it with a KDD Action and a DABV step inside a **Komodo Procedure** for full coverage in one scheduled job.
 
 ---
 
@@ -221,6 +221,7 @@ Then combine it with a KDD Action inside a **Komodo Procedure** for full databas
 | Project | Description |
 |---------|-------------|
 | [KDD](https://github.com/kayaman78/kdd) | Docker backup for MySQL, PostgreSQL, MongoDB |
+| [DABV](https://github.com/kayaman78/dabv) | Docker automated backup for volumes |
 | [KCR](https://github.com/kayaman78/kcr) | Komodo Action to run shell commands on remote servers |
 
 ---
