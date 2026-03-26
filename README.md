@@ -1,6 +1,6 @@
 # DABS — Docker Automated Backup for SQLite
 
-**Project Status**: Active | **Version**: 1.2 | **Maintained**: Yes
+**Project Status**: Active | **Version**: 1.3 | **Maintained**: Yes
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker](https://img.shields.io/badge/docker-required-blue.svg)](https://www.docker.com/)
@@ -59,7 +59,7 @@ A WARN does not block the process — the backup is kept and the service continu
 - Root or `sudo` access
 - Docker installed
 
-Dependencies installed automatically if missing: `file`, `jq`, `swaks`, `gzip`, `sqlite3`.
+Dependencies installed automatically if missing: `file`, `jq`, `swaks`, `gzip`, `sqlite3`, `curl`.
 
 ---
 
@@ -188,6 +188,11 @@ Then combine it with a KDD Action and a DABV step inside a **Komodo Procedure** 
 ---
 
 ## Changelog
+
+### v1.3
+- Fixed missing `curl` dependency — was used by Telegram and ntfy notifications but not auto-installed, causing silent failures when both email and push were configured
+- Fixed WAL/SHM backup error handling — on `gzip` failure for auxiliary files, the partial archive is now removed and a warning is logged; the main database backup is unaffected
+- Updated auto-install list to include `curl`
 
 ### v1.2
 - Added Telegram push notifications (independent of email and ntfy)

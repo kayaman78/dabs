@@ -65,6 +65,7 @@ declare -A DEP_MAP=(
     [swaks]="swaks"
     [gzip]="gzip"
     [sqlite3]="sqlite3"
+    [curl]="curl"
 )
 
 MISSING_PKGS=()
@@ -359,8 +360,22 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
 
             if gzip -c "$db_path" > "${DEST_BASE}.gz" 2>/dev/null; then
                 echo "      ✅ Backup OK → ${DEST_BASE}.gz"
-                [ -f "${db_path}-wal" ] && gzip -c "${db_path}-wal" > "${DEST_BASE}-wal.gz" && echo "      Backup OK → ${DEST_BASE}-wal.gz"
-                [ -f "${db_path}-shm" ] && gzip -c "${db_path}-shm" > "${DEST_BASE}-shm.gz" && echo "      Backup OK → ${DEST_BASE}-shm.gz"
+                if [ -f "${db_path}-wal" ]; then
+                    if gzip -c "${db_path}-wal" > "${DEST_BASE}-wal.gz" 2>/dev/null; then
+                        echo "      Backup OK → ${DEST_BASE}-wal.gz"
+                    else
+                        echo "      ⚠️  WARNING: failed to compress WAL file, removing partial"
+                        rm -f "${DEST_BASE}-wal.gz"
+                    fi
+                fi
+                if [ -f "${db_path}-shm" ]; then
+                    if gzip -c "${db_path}-shm" > "${DEST_BASE}-shm.gz" 2>/dev/null; then
+                        echo "      Backup OK → ${DEST_BASE}-shm.gz"
+                    else
+                        echo "      ⚠️  WARNING: failed to compress SHM file, removing partial"
+                        rm -f "${DEST_BASE}-shm.gz"
+                    fi
+                fi
                 ((COUNT_OK++))
 
                 # --- VERIFY ---
