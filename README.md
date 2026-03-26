@@ -1,6 +1,6 @@
 # DABS — Docker Automated Backup for SQLite
 
-**Project Status**: Active | **Version**: 1.3 | **Maintained**: Yes
+**Project Status**: Active | **Version**: 1.4 | **Maintained**: Yes
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker](https://img.shields.io/badge/docker-required-blue.svg)](https://www.docker.com/)
@@ -230,6 +230,11 @@ This downloads the new version alongside the old one. You can then diff them, id
 ---
 
 ## Changelog
+
+### v1.4
+- Fixed dry-run mode: retention phase was executing `rm -f` even with `DRY_RUN=on`, deleting real backups and logs while reporting "no filesystem changes"
+- Dry-run now shows a preview of what retention would remove without touching anything
+- Email report in dry-run mode includes a retention preview line when files would be affected
 
 ### v1.3
 - Fixed missing `curl` dependency — was used by Telegram and ntfy notifications but not auto-installed, causing silent failures when both email and push were configured

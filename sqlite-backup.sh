@@ -442,29 +442,42 @@ echo "[*] Removing backups older than $RETENTION_DAYS days..."
 
 DELETED_COUNT=0
 while IFS= read -r -d '' old_file; do
-    echo "    Removing: $old_file"
-    rm -f "$old_file"
+    if [ "$DRY_RUN" == "off" ]; then
+        echo "    Removing: $old_file"
+        rm -f "$old_file"
+    else
+        echo "    [DRY-RUN] Would remove: $old_file"
+    fi
     ((DELETED_COUNT++))
 done < <(
     find "$BACKUP_ROOT" -type f -name "*.gz" \
         -not -path "*/log/*" \
         -mtime +"$((RETENTION_DAYS - 1))" -print0
 )
-echo "    Removed $DELETED_COUNT file(s)."
+[ "$DRY_RUN" == "off" ] \
+    && echo "    Removed $DELETED_COUNT file(s)." \
+    || echo "    Would remove $DELETED_COUNT file(s) (dry-run)."
 
-find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -not -name "log" -empty -delete
+[ "$DRY_RUN" == "off" ] && \
+    find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -not -name "log" -empty -delete
 
 echo "[*] Removing logs older than $RETENTION_DAYS days..."
 DELETED_LOGS=0
 while IFS= read -r -d '' old_log; do
-    echo "    Removing log: $old_log"
-    rm -f "$old_log"
+    if [ "$DRY_RUN" == "off" ]; then
+        echo "    Removing log: $old_log"
+        rm -f "$old_log"
+    else
+        echo "    [DRY-RUN] Would remove: $old_log"
+    fi
     ((DELETED_LOGS++))
 done < <(
     find "$LOG_DIR" -type f -name "*.log" \
         -mtime +"$((RETENTION_DAYS - 1))" -print0
 )
-echo "    Removed $DELETED_LOGS log(s)."
+[ "$DRY_RUN" == "off" ] \
+    && echo "    Removed $DELETED_LOGS log(s)." \
+    || echo "    Would remove $DELETED_LOGS log(s) (dry-run)."
 
 # ==============================================================================
 # BUILD EMAIL
@@ -490,6 +503,7 @@ if [ "$DRY_RUN" == "off" ]; then
     [ $DELETED_LOGS -gt 0 ]  && SUMMARY_LINE+="<br>Logs removed by retention: <b>${DELETED_LOGS}</b>"
 else
     SUMMARY_LINE="Mode: <b>DRY-RUN</b> — <b>${COUNT_DRY}</b> database(s) found. No backup written, no filesystem changes."
+    [ $DELETED_COUNT -gt 0 ] && SUMMARY_LINE+="<br>Retention preview: <b>${DELETED_COUNT}</b> backup(s) and <b>${DELETED_LOGS}</b> log(s) would be removed."
 fi
 
 EXCLUSIONS_LINE=""
