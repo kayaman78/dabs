@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # DABS — Docker Automated Backup for SQLite
-# Version: 1.2
+# Version: 1.5
 # Platform: Debian / Ubuntu
 # https://github.com/kayaman78/dabs
 # ==============================================================================
@@ -176,6 +176,12 @@ verify_sqlite_backup() {
 # ==============================================================================
 
 build_text_summary() {
+    if [ "$DRY_RUN" == "on" ]; then
+        printf "🔍 DABS DRY-RUN — %s | %s\n%d database(s) found. No backups written." \
+            "$HOSTNAME" "$DATE_LABEL" "$COUNT_DRY"
+        return
+    fi
+
     local icon="✅"
     [ $COUNT_ERR -gt 0 ] && icon="❌"
     [ $COUNT_ERR -eq 0 ] && [ $COUNT_VERIFY_WARN -gt 0 ] && icon="⚠️"

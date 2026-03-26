@@ -231,6 +231,9 @@ This downloads the new version alongside the old one. You can then diff them, id
 
 ## Changelog
 
+### v1.5
+- Fixed `build_text_summary()` in dry-run mode — push notifications (Telegram/ntfy) were showing `0✅ 0❌ (total: 0)` instead of dry-run info; now show `🔍 DABS DRY-RUN — N database(s) found. No backups written.`
+
 ### v1.4
 - Fixed dry-run mode: retention phase was executing `rm -f` even with `DRY_RUN=on`, deleting real backups and logs while reporting "no filesystem changes"
 - Dry-run now shows a preview of what retention would remove without touching anything
