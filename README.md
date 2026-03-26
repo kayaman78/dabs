@@ -187,6 +187,48 @@ Then combine it with a KDD Action and a DABV step inside a **Komodo Procedure** 
 
 ---
 
+## Updating
+
+The script logic and your configuration live in the same file (`sqlite-backup.sh`), so updating requires a quick two-step process to avoid overwriting your settings.
+
+**1. Save your current configuration**
+
+Your settings are at the top of the script (everything above the `INITIAL CHECKS` block). Copy that section somewhere before replacing the file.
+
+**2. Replace the script**
+
+```bash
+curl -sL https://raw.githubusercontent.com/kayaman78/dabs/main/sqlite-backup.sh \
+  -o /srv/docker/dabs/sqlite-backup.sh
+```
+
+**3. Re-apply your settings**
+
+Paste your configuration block back at the top of the new script.
+
+---
+
+### Updating from Komodo (recommended)
+
+Create a KCR Action to handle the download step on each server, then re-apply settings manually:
+
+```json
+{
+  "server_name": "your-server",
+  "run_as": "root",
+  "commands": [
+    "cp /srv/docker/dabs/sqlite-backup.sh /srv/docker/dabs/sqlite-backup.sh.bak",
+    "curl -sL https://raw.githubusercontent.com/kayaman78/dabs/main/sqlite-backup.sh -o /srv/docker/dabs/sqlite-backup.sh.new"
+  ]
+}
+```
+
+This downloads the new version alongside the old one. You can then diff them, identify only what changed (see the [Changelog](#changelog) for guidance), and apply the code changes manually — leaving your configuration block untouched.
+
+> **Tip**: If you manage multiple servers, duplicate this Action and change `server_name` for each one. The process is the same across all of them.
+
+---
+
 ## Changelog
 
 ### v1.3
