@@ -8,10 +8,10 @@ Script Bash standalone che esegue backup automatici di database SQLite in ambien
 - `README.md` — documentazione utente
 
 ## Flusso principale (4 fasi)
-1. **SCAN** — cerca `.db/.sqlite/.sqlite3` (min 10KB) sotto `BASE_DIR`, verifica header SQLite, mappa ai container via `docker inspect`, raggruppa per service name
-2. **BACKUP+VERIFY** — stop service → `gzip` DB (+ WAL/SHM files con error handling) → riavvia → 3-step verify
-3. **RETENTION** — rimuove `.gz` e log con `-mtime +"$((RETENTION_DAYS - 1))"`, pulisce dir vuote
-4. **NOTIFICHE** — email HTML, Telegram, ntfy (indipendenti, ognuno con proprio `enabled` flag)
+1. **SCAN** — cerca `.db/.sqlite/.sqlite3` (min 10KB) sotto `BASE_DIR`, verifica header SQLite, mappa ai container via `docker inspect`, raggruppa per service name. `EXCLUDED_SERVICES` viene applicato qui (Phase 1), non in Phase 2 — i servizi esclusi non entrano mai in `SERVICE_DBS`.
+2. **BACKUP+VERIFY** — stop service → `gzip` DB (+ WAL/SHM files con error handling) → riavvia → 3-step verify. In DRY_RUN: skip tutto, incrementa `COUNT_DRY`.
+3. **RETENTION** — rimuove `.gz` e log con `-mtime +"$((RETENTION_DAYS - 1))"`, pulisce dir vuote. In DRY_RUN: solo preview, nessuna cancellazione.
+4. **NOTIFICHE** — email HTML, Telegram, ntfy (indipendenti, ognuno con proprio `enabled` flag). `build_text_summary()` ha branch DRY_RUN che usa `$COUNT_DRY`.
 
 ## Verifica 3-step
 1. `gzip -t` — integrità archivio
