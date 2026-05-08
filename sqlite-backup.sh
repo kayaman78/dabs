@@ -10,7 +10,7 @@
 DRY_RUN="off"                              # [on/off] — set to "on" to simulate without writing anything
 BASE_DIR="/srv/docker"                     # Root directory to scan for compose files
 BACKUP_ROOT="/srv/docker/dabs/backups"     # Root directory where backups will be stored
-RETENTION_DAYS=7                           # How many days to keep backups and logs
+RETENTION_DAYS=7                           # Number of most recent dumps to keep per database (calendar-independent)
 STOP_TIMEOUT=60                            # Seconds to wait for container stop before proceeding
 SIZE_DROP_WARN=20                          # % size drop vs previous backup that triggers a warning
 
@@ -443,23 +443,37 @@ done
 # ==============================================================================
 # RETENTION
 # ==============================================================================
+# Lists files in $1 matching $2 that are BEYOND the RETENTION_DAYS most recent
+# (deletion candidates). Calendar-independent: protects against mass-delete
+# when backups have been paused longer than RETENTION_DAYS — existing archives
+# survive until newer ones replace them.
+_files_to_rotate() {
+    local target="$1"
+    local pattern="$2"
+    [ -d "$target" ] || return 0
+    find "$target" -maxdepth 1 -type f -name "$pattern" -printf '%T@\t%p\n' 2>/dev/null \
+        | sort -rn \
+        | tail -n +$((RETENTION_DAYS + 1)) \
+        | cut -f2-
+}
+
 echo ""
-echo "[*] Removing backups older than $RETENTION_DAYS days..."
+echo "[*] Removing backups beyond the $RETENTION_DAYS most recent per database..."
 
 DELETED_COUNT=0
-while IFS= read -r -d '' old_file; do
-    if [ "$DRY_RUN" == "off" ]; then
-        echo "    Removing: $old_file"
-        rm -f "$old_file"
-    else
-        echo "    [DRY-RUN] Would remove: $old_file"
-    fi
-    ((DELETED_COUNT++))
-done < <(
-    find "$BACKUP_ROOT" -type f -name "*.gz" \
-        -not -path "*/log/*" \
-        -mtime +"$((RETENTION_DAYS - 1))" -print0
-)
+for db_dir in "$BACKUP_ROOT"/*/; do
+    [ -d "$db_dir" ] || continue
+    [ "$(basename "$db_dir")" = "log" ] && continue
+    while IFS= read -r old_file; do
+        if [ "$DRY_RUN" == "off" ]; then
+            echo "    Removing: $old_file"
+            rm -f -- "$old_file"
+        else
+            echo "    [DRY-RUN] Would remove: $old_file"
+        fi
+        ((DELETED_COUNT++))
+    done < <(_files_to_rotate "$db_dir" "*.gz")
+done
 [ "$DRY_RUN" == "off" ] \
     && echo "    Removed $DELETED_COUNT file(s)." \
     || echo "    Would remove $DELETED_COUNT file(s) (dry-run)."
@@ -467,20 +481,17 @@ done < <(
 [ "$DRY_RUN" == "off" ] && \
     find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -not -name "log" -empty -delete
 
-echo "[*] Removing logs older than $RETENTION_DAYS days..."
+echo "[*] Removing logs beyond the $RETENTION_DAYS most recent..."
 DELETED_LOGS=0
-while IFS= read -r -d '' old_log; do
+while IFS= read -r old_log; do
     if [ "$DRY_RUN" == "off" ]; then
         echo "    Removing log: $old_log"
-        rm -f "$old_log"
+        rm -f -- "$old_log"
     else
         echo "    [DRY-RUN] Would remove: $old_log"
     fi
     ((DELETED_LOGS++))
-done < <(
-    find "$LOG_DIR" -type f -name "*.log" \
-        -mtime +"$((RETENTION_DAYS - 1))" -print0
-)
+done < <(_files_to_rotate "$LOG_DIR" "*.log")
 [ "$DRY_RUN" == "off" ] \
     && echo "    Removed $DELETED_LOGS log(s)." \
     || echo "    Would remove $DELETED_LOGS log(s) (dry-run)."
@@ -551,7 +562,7 @@ HTML_BODY="<html>
 
 <p style='font-size: 11px; color: #aaa; margin-top: 24px;'>
     Log: ${LOG_FILE}<br>
-    Retention: ${RETENTION_DAYS} days &nbsp;|&nbsp; Backups at: ${BACKUP_ROOT}<br>
+    Retention: ${RETENTION_DAYS} most recent dumps per database &nbsp;|&nbsp; Backups at: ${BACKUP_ROOT}<br>
     Verify: gzip integrity + PRAGMA integrity_check + size trend (warn if drop &gt; ${SIZE_DROP_WARN}%)
 </p>
 

@@ -18,7 +18,7 @@ Automatic SQLite backup script for Docker environments. Discovers SQLite databas
 - **Service-aware** — groups multiple databases per service: one stop/start per service, not per file
 - **WAL support** — backs up `-wal` and `-shm` files alongside the main database
 - **Backup verification** — every backup is verified immediately after creation (see below)
-- **Retention** — auto-deletes backups and logs older than `RETENTION_DAYS`
+- **Retention** — keeps the `RETENTION_DAYS` most recent dumps per database (calendar-independent — pause-safe)
 - **Email report** — color-coded HTML email with separate Backup and Verify columns per database
 - **Push notifications** — optional Telegram and ntfy alerts, fully independent from each other and from email
 - **Dry-run mode** — scan and report without touching anything
@@ -71,7 +71,7 @@ All settings are at the top of the script.
 DRY_RUN="off"                          # "on" to simulate without writing anything
 BASE_DIR="/srv/docker"                 # Root directory to scan for compose files
 BACKUP_ROOT="/srv/docker/dabs/backups" # Root directory where backups will be stored
-RETENTION_DAYS=7                       # How many days to keep backups and logs
+RETENTION_DAYS=7                       # Number of most recent dumps to keep per database (calendar-independent)
 STOP_TIMEOUT=60                        # Seconds to wait for container stop before proceeding
 SIZE_DROP_WARN=20                      # % size drop vs previous backup that triggers a warning
 
@@ -182,7 +182,7 @@ Then combine it with a KDD Action and a DABV step inside a **Komodo Procedure** 
 4. Groups databases by service name
 5. For each service: stops it → compresses all its databases with `gzip` → restarts it
 6. Verifies each backup: gzip integrity + `PRAGMA integrity_check` + size trend
-7. Applies retention policy — removes old `.gz` files and logs
+7. Applies retention policy — keeps the N most recent `.gz` files per database (and logs); older ones removed only when replaced
 8. Sends email report, Telegram message, and/or ntfy alert — each independently
 
 ---
