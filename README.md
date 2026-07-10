@@ -1,6 +1,6 @@
 # DABS — Docker Automated Backup for SQLite
 
-**Project Status**: Active | **Version**: 1.5 | **Maintained**: Yes
+**Project Status**: Active | **Version**: 1.6 | **Maintained**: Yes
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker](https://img.shields.io/badge/docker-required-blue.svg)](https://www.docker.com/)
@@ -230,6 +230,10 @@ This downloads the new version alongside the old one. You can then diff them, id
 ---
 
 ## Changelog
+
+### v1.6
+- Stderr on gzip failures is now captured and logged instead of hidden.
+- Proper exit code: `exit 1` if any backup failed, `exit 0` otherwise. KCR can now detect failures.
 
 ### v1.5
 - Fixed `build_text_summary()` in dry-run mode — push notifications (Telegram/ntfy) were showing `0✅ 0❌ (total: 0)` instead of dry-run info; now show `🔍 DABS DRY-RUN — N database(s) found. No backups written.`

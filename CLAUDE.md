@@ -1,75 +1,30 @@
 # DABS — Docker Automated Backup for SQLite
 
-## Scopo
-Script Bash standalone che esegue backup automatici di database SQLite in ambienti Docker. Scopre automaticamente i DB dai compose file, ferma gracefully i container, comprime e verifica i backup.
-
 ## File
-- `sqlite-backup.sh` — script principale, unico entry point
-- `README.md` — documentazione utente
+- `sqlite-backup.sh` — script unico
+- `README.md` — documentazione
 
-## Flusso principale (4 fasi)
-1. **SCAN** — cerca `.db/.sqlite/.sqlite3` (min 10KB) sotto `BASE_DIR`, verifica header SQLite, mappa ai container via `docker inspect`, raggruppa per service name. `EXCLUDED_SERVICES` viene applicato qui (Phase 1), non in Phase 2 — i servizi esclusi non entrano mai in `SERVICE_DBS`.
-2. **BACKUP+VERIFY** — stop service → `gzip` DB (+ WAL/SHM files con error handling) → riavvia → 3-step verify. In DRY_RUN: skip tutto, incrementa `COUNT_DRY`.
-3. **RETENTION** — rimuove `.gz` e log con `-mtime +"$((RETENTION_DAYS - 1))"`, pulisce dir vuote. In DRY_RUN: solo preview, nessuna cancellazione.
-4. **NOTIFICHE** — email HTML, Telegram, ntfy (indipendenti, ognuno con proprio `enabled` flag). `build_text_summary()` ha branch DRY_RUN che usa `$COUNT_DRY`.
+## Flusso (4 fasi)
+1. **SCAN** — trova `.db/.sqlite/.sqlite3` (min 10KB) sotto `BASE_DIR`, verifica header SQLite, mappa a container via docker inspect, raggruppa per service. `EXCLUDED_SERVICES` applicato qui.
+2. **BACKUP+VERIFY** — stop service → gzip DB (+WAL/SHM) → start → verify 3-step. Stderr catturato su failure.
+3. **RETENTION** — N-most-recent per DB (`_files_to_rotate`). Stessa policy per log.
+4. **NOTIFICHE** — email HTML (swaks), Telegram, ntfy (indipendenti).
 
-## Verifica 3-step
-1. `gzip -t` — integrità archivio
-2. decompress temp + `sqlite3 PRAGMA integrity_check` — integrità DB
-3. confronto size vs backup precedente — warning se calo > `SIZE_DROP_WARN`%
+## Verify 3-step
+1. `gzip -t` integrità
+2. decompress temp + `sqlite3 PRAGMA integrity_check`
+3. size drop vs backup precedente (warn se > `SIZE_DROP_WARN`%)
 
-## WAL/SHM handling
-Dopo il backup del file `.db` principale, tenta di comprimere anche i file `-wal` e `-shm` se presenti. Se `gzip` fallisce su questi file ausiliari: rimuove il file parziale e logga un warning (non conta come errore del backup principale, che è già stato completato).
+## Exit code
+`exit 1` se `COUNT_ERR > 0`, altrimenti `exit 0`. KCR rileva il fallimento.
 
-## Configurazione (variabili top script)
-```bash
-DRY_RUN="off"
-BASE_DIR="/srv/docker"          # root per discover compose files
-BACKUP_ROOT="/srv/docker/dabs/backups"
-RETENTION_DAYS=7
-STOP_TIMEOUT=60                 # secondi attesa stop container
-SIZE_DROP_WARN=20               # % calo size che triggera warning
-EXCLUDED_SERVICES=()
+## Config (variabili top script)
+`DRY_RUN`, `BASE_DIR`, `BACKUP_ROOT`, `RETENTION_DAYS`, `STOP_TIMEOUT`, `SIZE_DROP_WARN`, `EXCLUDED_SERVICES`, SMTP, Telegram, ntfy.
 
-# SMTP via swaks (25/465/587 — auto-TLS)
-SMTP_SERVER, SMTP_PORT, EMAIL_FROM, EMAIL_TO
+## Dipendenze (auto-installate)
+`file`, `jq`, `swaks`, `gzip`, `sqlite3`, `curl` — richiede root, Debian/Ubuntu.
 
-# Push notifications (ciascuno indipendente)
-TELEGRAM_ENABLED="false"
-NTFY_ENABLED="false"
-```
-
-## Output struttura
-```
-BACKUP_ROOT/
-├── <service-name>/
-│   ├── app.db_YYYYMMDD_HHMMSS.gz
-│   └── app.db_YYYYMMDD_HHMMSS-wal.gz   # solo se presente
-└── log/
-    └── backup-sqlite_YYYYMMDD.log
-```
-
-## Dipendenze (auto-installate se mancanti)
-`file`, `jq`, `swaks`, `gzip`, `sqlite3`, `curl` — richiede root, piattaforma Debian/Ubuntu
-
-## Integrazione nell'ecosistema
-Viene lanciato da **KCR** (Komodo Command Runner) come action schedulata:
+## Lanciato da KCR
 ```json
-{
-  "server_name": "prod",
-  "run_as": "root",
-  "commands": ["bash /srv/docker/dabs/backup-sqlite.sh"],
-  "timeout_seconds": 600
-}
+{ "server_name": "prod", "commands": ["bash /srv/docker/dabs/sqlite-backup.sh"], "timeout_seconds": 600 }
 ```
-
-## Coerenza con l'ecosistema
-- Retention: usa `-mtime +"$((RETENTION_DAYS - 1))"` — identico a DABV
-- Notifiche: struttura `send_telegram` / `send_ntfy` / `build_text_summary` — identica a DABV
-- Email: via `swaks` — identico a DABV (KDD usa `msmtp`)
-
-## Non implementato (by design o low-priority)
-- Backup su storage remoto (S3, rsync)
-- Encryption at rest
-- Parallelizzazione (sequenziale per safety)
-- Retry su errori transitori

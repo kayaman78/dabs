@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # DABS — Docker Automated Backup for SQLite
-# Version: 1.5
+# Version: 1.6
 # Platform: Debian / Ubuntu
 # https://github.com/kayaman78/dabs
 # ==============================================================================
@@ -364,7 +364,9 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
         if [ "$DRY_RUN" == "off" ]; then
             DEST_BASE="$DEST_DIR/${DB_NAME}_${DATE_ID}"
 
-            if gzip -c "$db_path" > "${DEST_BASE}.gz" 2>/dev/null; then
+            err_file=$(mktemp)
+            if gzip -c "$db_path" > "${DEST_BASE}.gz" 2>"$err_file"; then
+                rm -f "$err_file"
                 echo "      ✅ Backup OK → ${DEST_BASE}.gz"
                 if [ -f "${db_path}-wal" ]; then
                     if gzip -c "${db_path}-wal" > "${DEST_BASE}-wal.gz" 2>/dev/null; then
@@ -412,6 +414,12 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
 
             else
                 echo "      ❌ ERROR: failed to compress $db_path"
+                if [ -s "$err_file" ]; then
+                    while IFS= read -r errline; do
+                        echo "      $errline"
+                    done < "$err_file"
+                fi
+                rm -f "$err_file"
                 rm -f "${DEST_BASE}.gz"
                 ROW_BACKUP_COLOR="#f8d7da"; ROW_BACKUP_ICON="❌"; ROW_BACKUP_STATUS="ERROR"
                 ROW_VERIFY_COLOR="#f2f2f2"; ROW_VERIFY_ICON="—"; ROW_VERIFY_STATUS="skipped"
@@ -607,3 +615,6 @@ echo ""
 echo "============================================================"
 echo "END SQLite Backup: $(date)"
 echo "============================================================"
+
+[ $COUNT_ERR -gt 0 ] && exit 1
+exit 0
