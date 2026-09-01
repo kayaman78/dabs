@@ -25,7 +25,7 @@ Il giro notturno (cron/KCR) non chiede mai niente: un prompt lì appenderebbe il
 - `SCAN_VOLUMES="on"|"off"` — interruttore generale
 - Nessun `volumes.conf` = tutti i volumi non-database
 
-## ⚠️ Trappola pagata addosso (S592): `read` dentro un `while` con process substitution
+## ⚠️ Trappola pagata addosso: `read` dentro un `while` con process substitution
 `done < <(...)` ridirige lo stdin **dell'intero blocco**, quindi un `read` interattivo dentro il loop consuma la process substitution, non le risposte dell'utente. Torna riga vuota → ogni prompt veniva letto come «sì». Cura: `exec 3<&0` prima dei loop e `read -u 3`. E un `read` fallito **esce**, non assume «include»: un default silenzioso qui ti iscrive a fermare un servizio ogni notte.
 
 ## Verify 3-step
