@@ -155,11 +155,21 @@ BACKUP_ROOT/
 
 ## Usage
 
-```bash
-# Run manually as root
-sudo bash sqlite-backup.sh
+Run manually, as root:
 
-# Schedule via cron — daily at 3 AM
+```bash
+sudo bash /srv/docker/dabs/sqlite-backup.sh
+```
+
+Discover which named volumes to include (interactive, one time):
+
+```bash
+sudo bash /srv/docker/dabs/sqlite-backup.sh --setup
+```
+
+Schedule it — this line goes in the crontab (`crontab -e`), not in a shell:
+
+```
 0 3 * * * /bin/bash /srv/docker/dabs/sqlite-backup.sh
 ```
 
@@ -277,8 +287,7 @@ Your settings are at the top of the script (everything above the `INITIAL CHECKS
 **2. Replace the script**
 
 ```bash
-curl -sL https://raw.githubusercontent.com/kayaman78/dabs/main/sqlite-backup.sh \
-  -o /srv/docker/dabs/sqlite-backup.sh
+curl -sL https://raw.githubusercontent.com/kayaman78/dabs/main/sqlite-backup.sh -o /srv/docker/dabs/sqlite-backup.sh
 ```
 
 **3. Re-apply your settings**
