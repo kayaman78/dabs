@@ -1,20 +1,22 @@
 # DABS — Docker Automated Backup for SQLite
 
-**Project Status**: Active | **Version**: 1.6 | **Maintained**: Yes
+**Project Status**: Active | **Version**: 1.7 | **Maintained**: Yes
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker](https://img.shields.io/badge/docker-required-blue.svg)](https://www.docker.com/)
 [![Platform](https://img.shields.io/badge/platform-Debian%20%2F%20Ubuntu-informational.svg)](https://www.debian.org/)
 
-Automatic SQLite backup script for Docker environments. Discovers SQLite databases mounted by running containers, stops each service briefly, creates compressed backups, restarts the service, and immediately verifies the backup integrity. Sends an HTML email report on completion.
+Automatic SQLite backup script for Docker environments. Discovers SQLite databases used by running containers — both in bind mounts and in **named volumes** — stops each service briefly, creates compressed backups, restarts the service, and immediately verifies the backup integrity. Sends an HTML email report on completion.
 
-> Part of the **KDD ecosystem** — see also [KDD](https://github.com/kayaman78/kdd) for MySQL / PostgreSQL / MongoDB, [DABV](https://github.com/kayaman78/dabv) for Docker volumes, and [KCR](https://github.com/kayaman78/kcr) to run DABS from a Komodo Action.
+> Part of the **KDD ecosystem** — see also [KDD](https://github.com/kayaman78/kdd) for MySQL / PostgreSQL / MongoDB, [DABV](https://github.com/kayaman78/dabv) for Docker volumes, [DABR](https://github.com/kayaman78/dabr) for host paths, and [KCR](https://github.com/kayaman78/kcr) to run DABS from a Komodo Action.
 
 ---
 
 ## Features
 
 - **Auto-discovery** — scans compose files under `BASE_DIR` and finds `.db`, `.sqlite`, `.sqlite3` files
+- **Named volume support** — also scans the named volumes of running containers, so databases with no path under `BASE_DIR` are still found
+- **Database volumes skipped** — volumes belonging to database engines are left to KDD, never opened by DABS
 - **Service-aware** — groups multiple databases per service: one stop/start per service, not per file
 - **WAL support** — backs up `-wal` and `-shm` files alongside the main database
 - **Backup verification** — every backup is verified immediately after creation (see below)
@@ -76,6 +78,10 @@ STOP_TIMEOUT=60                        # Seconds to wait for container stop befo
 SIZE_DROP_WARN=20                      # % size drop vs previous backup that triggers a warning
 
 EXCLUDED_SERVICES=()                   # Exact compose service names to skip
+
+# Container images whose named volumes are never scanned (data belongs to KDD).
+# Substring match on the image name — add your own engines if you run any.
+DB_IMAGE_PATTERNS=("postgres" "mysql" "mariadb" "mongo" "redis" "timescaledb" "postgis")
 
 SMTP_SERVER="smtp.example.com"
 SMTP_PORT="587"         # 25 = plain relay | 465 = SMTPS | 587 = STARTTLS
@@ -151,10 +157,10 @@ BACKUP_ROOT/
 
 ```bash
 # Run manually as root
-sudo bash backup-sqlite.sh
+sudo bash sqlite-backup.sh
 
 # Schedule via cron — daily at 3 AM
-0 3 * * * /bin/bash /srv/docker/dabs/backup-sqlite.sh
+0 3 * * * /bin/bash /srv/docker/dabs/sqlite-backup.sh
 ```
 
 ### Running from Komodo via KCR
@@ -165,7 +171,7 @@ Use [KCR](https://github.com/kayaman78/kcr) to trigger DABS directly from a Komo
 {
   "server_name": "your-server",
   "run_as": "root",
-  "commands": ["bash /srv/docker/dabs/backup-sqlite.sh"],
+  "commands": ["bash /srv/docker/dabs/sqlite-backup.sh"],
   "stop_on_error": true
 }
 ```
@@ -178,12 +184,85 @@ Then combine it with a KDD Action and a DABV step inside a **Komodo Procedure** 
 
 1. Finds all compose files under `BASE_DIR`
 2. Locates `.db` / `.sqlite` / `.sqlite3` files (min 10 KB, valid SQLite header verified)
-3. Matches each file to a running container via Docker mount inspection
-4. Groups databases by service name
-5. For each service: stops it → compresses all its databases with `gzip` → restarts it
-6. Verifies each backup: gzip integrity + `PRAGMA integrity_check` + size trend
-7. Applies retention policy — keeps the N most recent `.gz` files per database (and logs); older ones removed only when replaced
-8. Sends email report, Telegram message, and/or ntfy alert — each independently
+3. Scans the **named volumes** of every running container for the same file types, skipping containers whose image is a database engine
+4. Matches each file to a running container via Docker mount inspection
+5. Groups databases by service name
+6. For each service: stops it → compresses all its databases with `gzip` → restarts it
+7. Verifies each backup: gzip integrity + `PRAGMA integrity_check` + size trend
+8. Applies retention policy — keeps the N most recent `.gz` files per database (and logs); older ones removed only when replaced
+9. Sends email report, Telegram message, and/or ntfy alert — each independently
+
+---
+
+## Named volumes — why they need their own scan
+
+A database in a named volume has no path under `BASE_DIR`, so the compose scan
+can never reach it. The failure mode is the dangerous one: DABS finds nothing,
+reports a clean run, and the database is simply never backed up. Nothing in the
+email says so.
+
+The mount `Source` of a named volume *is* a real host path
+(`/var/lib/docker/volumes/<name>/_data`), so once the file is found everything
+downstream — matching it to a service, stopping that service, verifying the
+archive — works exactly as it does for bind mounts.
+
+### Choosing which volumes to include — `--setup`
+
+Backing up a database means stopping its service for the duration of the copy,
+so the volume scan is worth a deliberate answer rather than a default. Run:
+
+```bash
+sudo bash sqlite-backup.sh --setup
+```
+
+It walks the named volumes of running containers, shows the SQLite databases
+found in each one and which service would be stopped, asks, and writes
+`volumes.conf`:
+
+```
+# DABS volume config — generated 2026-09-01 13:20
+# Format:  <volume name>: include | exclude
+myapp-data: include
+cache-data: exclude
+```
+
+Edit that file directly anytime — no need to re-run `--setup`. A volume not
+listed is included.
+
+**The nightly run never asks anything.** It is started by cron or KCR, where a
+prompt would hang the job until the timeout: `--setup` is the only interactive
+mode, and the run just reads the answer. Two switches control it:
+
+| Setting | Effect |
+|---|---|
+| `SCAN_VOLUMES="off"` | volume scan disabled entirely, back to pre-1.7 behaviour |
+| `VOLUMES_CONFIG_FILE` | path of the file written by `--setup`; if absent, every non-database volume is scanned |
+
+### Database volumes are skipped on purpose
+
+Volumes belonging to a database engine are never scanned. The `DB_IMAGE_PATTERNS`
+list at the top of the script matches the container image:
+
+```bash
+DB_IMAGE_PATTERNS=("postgres" "mysql" "mariadb" "mongo" "redis" "timescaledb" "postgis")
+```
+
+This is the same list DABV uses, deliberately: the two tools must agree on what
+counts as a database.
+
+The reason is not tidiness. Database engines write real SQLite files into their
+own data directories as scratch space — PostgreSQL with the `vchord` vector
+extension is one example. Without this guard, DABS would find such a file,
+attribute it to the `postgres` service, and **stop your production database
+every night to copy a temporary file**. Nothing would look wrong: the report
+would show a successful backup.
+
+Those scratch files are often just under the 10 KB threshold, which means a
+setup can look fine for months and start stopping the database the day they
+grow. The size threshold is not a safety mechanism — this list is.
+
+Data inside database volumes belongs to [KDD](https://github.com/kayaman78/kdd),
+which takes proper logical dumps without stopping anything.
 
 ---
 
@@ -230,6 +309,14 @@ This downloads the new version alongside the old one. You can then diff them, id
 ---
 
 ## Changelog
+
+### v1.7
+- **`--setup` mode** — interactive volume discovery, writes `volumes.conf`. The nightly run stays fully non-interactive. Plus `SCAN_VOLUMES` to switch the whole thing off.
+- **Named volumes are now scanned.** Databases living in a named volume have no path under `BASE_DIR`, so the compose scan never reached them — DABS reported a clean run and backed up nothing. Found on a real setup: a 3.7 MB SQLite database had never been backed up, and no report ever said so.
+- **`DB_IMAGE_PATTERNS` guard** — volumes of database engines are skipped, same list as DABV. Without it, PostgreSQL's `vchord` scratch SQLite files would be picked up and the production database stopped nightly to copy them. They currently sit just under the 10 KB threshold, so the problem appears only once they grow: the threshold was never the safeguard.
+- **The stop is now verified.** After stopping a service, DABS checks that no container with that service label is still running. If one is, the copy still happens — a doubtful backup beats no backup — but the row is marked `OK (HOT — service did not stop)` and the global status becomes WARN, instead of reporting a clean green backup of a live database.
+- **Multi-file compose projects** — the container label lists compose files comma-separated. They were passed to `docker compose -f` as one string, which fails, so the service would not be stopped before the copy. Each file now gets its own `-f`.
+- Scan logic extracted into `register_db()`, shared by both phases so they cannot drift apart.
 
 ### v1.6
 - Stderr on gzip failures is now captured and logged instead of hidden.
@@ -281,6 +368,7 @@ This downloads the new version alongside the old one. You can then diff them, id
 |---------|-------------|
 | [KDD](https://github.com/kayaman78/kdd) | Docker backup for MySQL, PostgreSQL, MongoDB |
 | [DABV](https://github.com/kayaman78/dabv) | Docker automated backup for volumes |
+| [DABR](https://github.com/kayaman78/dabr) | Hardlinked snapshots of host paths |
 | [KCR](https://github.com/kayaman78/kcr) | Komodo Action to run shell commands on remote servers |
 
 ---
