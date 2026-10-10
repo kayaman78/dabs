@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # DABS — Docker Automated Backup for SQLite
-# Version: 1.7
+# Version: 1.8
 # Platform: Debian / Ubuntu
 # https://github.com/kayaman78/dabs
 # ==============================================================================
@@ -17,6 +17,11 @@ SIZE_DROP_WARN=20                          # % size drop vs previous backup that
 # Services to skip — exact compose service names (com.docker.compose.service label)
 # Example: EXCLUDED_SERVICES=("homeassistant" "pihole")
 EXCLUDED_SERVICES=()
+
+# Paths to skip — glob patterns on the database's host path. For files that are
+# SQLite but are not a database to keep: an app's own pre-migration copies, caches.
+# Example: EXCLUDED_PATHS=("/var/lib/docker/volumes/app-data/_data/copies/*")
+EXCLUDED_PATHS=()
 
 # --- NAMED VOLUME SCAN ---
 SCAN_VOLUMES="on"                                    # [on/off] — also look inside named volumes
@@ -434,6 +439,7 @@ send_ntfy() {
 # ==============================================================================
 declare -A SERVICE_DBS
 declare -A SERVICE_CF
+declare -A SERVICE_PEERS    # other services mounting the same databases: "service<TAB>compose files" lines
 
 mapfile -t COMPOSE_FILES < <(
     find "$BASE_DIR" -type f \( -name "compose.y*ml" -o -name "docker-compose.y*ml" \) \
@@ -472,6 +478,15 @@ register_db() {
     [[ -n "${SEEN_DBS[$db_path]}" ]] && return 0
     SEEN_DBS[$db_path]=1
 
+    local pat
+    for pat in "${EXCLUDED_PATHS[@]}"; do
+        # $pat unquoted on purpose: it is a glob
+        if [[ "$db_path" == $pat ]]; then
+            echo "[~] ⏭️  Skipped (excluded path): $db_path"
+            return 0
+        fi
+    done
+
     if ! file "$db_path" | grep -q "SQLite 3.x database"; then
         echo "[~] ⏭️  Skipped (not SQLite): $db_path"
         return 0
@@ -482,19 +497,30 @@ register_db() {
         return 0
     fi
 
-    local SERVICE_NAME="" BEST_LEN=0 cid SVC src
+    # The owner is the container with the most specific mount. Several services
+    # can share that mount (two containers of one app on the same volume): the
+    # hash order of CID_SVC changes whenever a container is recreated, so taking
+    # «the first one found» moved a database's backups to another folder
+    # overnight. The owner is the first BY NAME, and the others are stopped
+    # with it — a SQLite copied while a second writer is up is a hot copy.
+    local SERVICE_NAME="" BEST_LEN=0 cid src PEER
+    local -a OWNERS=()
     for cid in "${!CID_SVC[@]}"; do
-        SVC="${CID_SVC[$cid]}"
         while IFS= read -r src; do
             [ -z "$src" ] && continue
             if [[ "$db_path" == "$src/"* ]] || [[ "$db_path" == "$src" ]]; then
                 if [ ${#src} -gt $BEST_LEN ]; then
                     BEST_LEN=${#src}
-                    SERVICE_NAME="$SVC"
+                    OWNERS=("$cid")
+                elif [ ${#src} -eq $BEST_LEN ]; then
+                    OWNERS+=("$cid")
                 fi
             fi
         done <<< "${CID_MOUNTS[$cid]}"
     done
+    if [ ${#OWNERS[@]} -gt 0 ]; then
+        SERVICE_NAME=$(for cid in "${OWNERS[@]}"; do printf '%s\n' "${CID_SVC[$cid]}"; done | sort -u | head -n 1)
+    fi
 
     if [ -z "$SERVICE_NAME" ] || [ "$SERVICE_NAME" == "null" ]; then
         echo "[~] ⏭️  Skipped (no active container mounts this path): $db_path"
@@ -508,6 +534,13 @@ register_db() {
 
     SERVICE_DBS[$SERVICE_NAME]+="$db_path"$'\n'
     SERVICE_CF[$SERVICE_NAME]="$cf"
+
+    for cid in "${OWNERS[@]}"; do
+        [ "${CID_SVC[$cid]}" = "$SERVICE_NAME" ] && continue
+        PEER="${CID_SVC[$cid]}"$'\t'"${CID_CF[$cid]}"
+        [[ $'\n'"${SERVICE_PEERS[$SERVICE_NAME]}" == *$'\n'"$PEER"$'\n'* ]] \
+            || SERVICE_PEERS[$SERVICE_NAME]+="$PEER"$'\n'
+    done
 }
 
 # --- 1a. Bind mounts and loose files, found next to the compose files ---
@@ -567,8 +600,18 @@ fi
 # ==============================================================================
 # PHASE 2 — BACKUP + VERIFY
 # ==============================================================================
+# Fills COMPOSE_ARGS with one -f per compose file in $1 (comma-separated).
+_compose_args() {
+    COMPOSE_ARGS=()
+    while IFS= read -r one_cf; do
+        [ -z "$one_cf" ] && continue
+        COMPOSE_ARGS+=(-f "$one_cf")
+    done < <(printf '%s\n' "$1" | tr ',' '\n')
+}
+
 for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
     cf="${SERVICE_CF[$SERVICE_NAME]}"
+    mapfile -t PEER_LIST < <(printf '%s' "${SERVICE_PEERS[$SERVICE_NAME]}" | grep -v '^$')
 
     # A compose project can be built from several files (base + override), and
     # the container label lists them comma-separated. Each one needs its own -f:
@@ -578,11 +621,7 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
     # trailing newline, which left COMPOSE_ARGS empty for single-file projects —
     # the common case. `docker compose stop` then ran with no -f at all, found
     # no project, and every service was copied while still running.
-    COMPOSE_ARGS=()
-    while IFS= read -r one_cf; do
-        [ -z "$one_cf" ] && continue
-        COMPOSE_ARGS+=(-f "$one_cf")
-    done < <(printf '%s\n' "$cf" | tr ',' '\n')
+    _compose_args "$cf"
 
     mapfile -t DB_LIST < <(printf '%s' "${SERVICE_DBS[$SERVICE_NAME]}" | grep -v '^$')
 
@@ -599,6 +638,13 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
         # label still points at the old path. Without this check the databases
         # would be copied hot and the report would call it a clean backup.
         STILL_UP=$(docker ps -q --filter "label=com.docker.compose.service=$SERVICE_NAME" | wc -l)
+        for peer in "${PEER_LIST[@]}"; do
+            echo "    ⏸️  Stopping ${peer%%$'\t'*} too — it mounts the same database..."
+            _compose_args "${peer#*$'\t'}"
+            docker compose "${COMPOSE_ARGS[@]}" stop -t "$STOP_TIMEOUT" "${peer%%$'\t'*}"
+            STILL_UP=$(( STILL_UP + $(docker ps -q --filter "label=com.docker.compose.service=${peer%%$'\t'*}" | wc -l) ))
+        done
+        _compose_args "$cf"
         if [ "$STILL_UP" -gt 0 ]; then
             HOT_COPY="yes"
             echo "    ⚠️  WARNING: $SERVICE_NAME is still running — copying HOT."
@@ -719,6 +765,11 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
     if [ "$DRY_RUN" == "off" ]; then
         echo "    ▶️  Starting $SERVICE_NAME..."
         docker compose "${COMPOSE_ARGS[@]}" start "$SERVICE_NAME"
+        for peer in "${PEER_LIST[@]}"; do
+            echo "    ▶️  Starting ${peer%%$'\t'*}..."
+            _compose_args "${peer#*$'\t'}"
+            docker compose "${COMPOSE_ARGS[@]}" start "${peer%%$'\t'*}"
+        done
     fi
 done
 
@@ -739,6 +790,28 @@ _files_to_rotate() {
         | cut -f2-
 }
 
+# Dumps BEYOND the RETENTION_DAYS most recent, counted per DATABASE. A dump is
+# <db>_<YYYYMMDD>_<HHMMSS>.gz, with -wal/-shm companions from the same run that
+# go with it. Up to 1.7 this counted files per service folder: a service with
+# three databases, or one database with its WAL, kept a third of the history
+# the report promised — while saying "per database".
+_dumps_to_rotate() {
+    local target="$1" main key comp
+    [ -d "$target" ] || return 0
+    local -A kept=()
+    while IFS=$'\t' read -r _ main; do
+        key=$(basename "$main")
+        key="${key%_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].gz}"
+        kept[$key]=$(( ${kept[$key]:-0} + 1 ))
+        [ "${kept[$key]}" -le "$RETENTION_DAYS" ] && continue
+        printf '%s\n' "$main"
+        for comp in "${main%.gz}-wal.gz" "${main%.gz}-shm.gz"; do
+            [ -f "$comp" ] && printf '%s\n' "$comp"
+        done
+    done < <(find "$target" -maxdepth 1 -type f -name '*.gz' ! -name '*-wal.gz' ! -name '*-shm.gz' \
+                 -printf '%T@\t%p\n' 2>/dev/null | sort -rn)
+}
+
 echo ""
 echo "[*] Removing backups beyond the $RETENTION_DAYS most recent per database..."
 
@@ -754,7 +827,7 @@ for db_dir in "$BACKUP_ROOT"/*/; do
             echo "    [DRY-RUN] Would remove: $old_file"
         fi
         ((DELETED_COUNT++))
-    done < <(_files_to_rotate "$db_dir" "*.gz")
+    done < <(_dumps_to_rotate "$db_dir")
 done
 [ "$DRY_RUN" == "off" ] \
     && echo "    Removed $DELETED_COUNT file(s)." \

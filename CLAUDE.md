@@ -9,9 +9,10 @@
 1. **SCAN** — due sorgenti, stesso filtro:
    - **1a** `.db/.sqlite/.sqlite3` (min 10KB) sotto `BASE_DIR`, accanto ai compose
    - **1b** stessi tipi dentro i **volumi nominati** dei container vivi
-   Entrambe passano da `register_db()`: header SQLite verificato con `file`, mappatura a container via docker inspect, raggruppamento per service, `EXCLUDED_SERVICES` applicato.
-2. **BACKUP+VERIFY** — stop service → gzip DB (+WAL/SHM) → start → verify 3-step. Stderr catturato su failure.
-3. **RETENTION** — N-most-recent per DB (`_files_to_rotate`). Stessa policy per log.
+   Entrambe passano da `register_db()`: `EXCLUDED_PATHS`, header SQLite verificato con `file`, mappatura a container via docker inspect, raggruppamento per service, `EXCLUDED_SERVICES` applicato.
+   ⚠️ Un DB montato da più service (due container sullo stesso volume): il proprietario è il **primo per nome**, gli altri vanno in `SERVICE_PEERS` e si fermano con lui. L'ordine di `CID_SVC` è quello dell'hash e cambia a ogni container ricreato: «il primo trovato» spostava le copie di cartella da una notte all'altra.
+2. **BACKUP+VERIFY** — stop service (+ i peers) → gzip DB (+WAL/SHM) → start → verify 3-step. Stderr catturato su failure.
+3. **RETENTION** — N-most-recent **per DB** (`_dumps_to_rotate`: raggruppa per nome prima di `_AAAAMMGG_HHMMSS.gz`, i `-wal`/`-shm` seguono la loro principale). ⚠️ Una cartella è un SERVICE, non un DB: contare i file per cartella (fino alla 1.7) dava a Pi-hole un terzo della storia. I log usano `_files_to_rotate`, per cartella, ed è giusto.
 4. **NOTIFICHE** — email HTML (swaks), Telegram, ntfy (indipendenti).
 
 ## Perché la fase 1b esiste

@@ -1,6 +1,6 @@
 # DABS — Docker Automated Backup for SQLite
 
-**Project Status**: Active | **Version**: 1.7 | **Maintained**: Yes
+**Project Status**: Active | **Version**: 1.8 | **Maintained**: Yes
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker](https://img.shields.io/badge/docker-required-blue.svg)](https://www.docker.com/)
@@ -78,6 +78,7 @@ STOP_TIMEOUT=60                        # Seconds to wait for container stop befo
 SIZE_DROP_WARN=20                      # % size drop vs previous backup that triggers a warning
 
 EXCLUDED_SERVICES=()                   # Exact compose service names to skip
+EXCLUDED_PATHS=()                      # Glob patterns on the database's host path to skip
 
 # Container images whose named volumes are never scanned (data belongs to KDD).
 # Substring match on the image name — add your own engines if you run any.
@@ -318,6 +319,11 @@ This downloads the new version alongside the old one. You can then diff them, id
 ---
 
 ## Changelog
+
+### v1.8
+- **Retention is now really per database.** Up to 1.7 it kept the N most recent files *per service folder*, while the log said "per database". A service with three databases (Pi-hole) or one database with its `-wal`/`-shm` companions kept a third of the promised history; found on a real setup where an app's own pre-migration copies, each with a new name, pushed the real database down to 3 days out of 14. Dumps are now grouped by database name, and the `-wal`/`-shm` of a run go with it.
+- **`EXCLUDED_PATHS`** — glob patterns on the host path, for files that are SQLite but not a database worth keeping (an app's pre-migration copies, caches). `EXCLUDED_SERVICES` could only drop a whole service.
+- **A database mounted by more than one service has a fixed owner, and all of them are stopped.** The owner used to be whichever container came first in a hash order that changes every time a container is recreated, so the backups of a shared database moved to another folder overnight — and the other service kept writing while the file was copied. The owner is now the first service by name, and the others are stopped and started with it.
 
 ### v1.7
 - **`--setup` mode** — interactive volume discovery, writes `volumes.conf`. The nightly run stays fully non-interactive. Plus `SCAN_VOLUMES` to switch the whole thing off.
