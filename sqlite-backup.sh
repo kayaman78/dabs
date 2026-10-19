@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # DABS — Docker Automated Backup for SQLite
-# Version: 1.8
+# Version: 1.9
 # Platform: Debian / Ubuntu
 # https://github.com/kayaman78/dabs
 # ==============================================================================
@@ -74,6 +74,19 @@ is_db_image() {
     done
     return 1
 }
+
+# ==============================================================================
+# WHAT A CONTAINER REALLY MOUNTS — docker inspect formats
+# A volume mounted with a subpath (compose `volume: subpath:`) shows in .Mounts
+# with the Source of the WHOLE volume: the subpath lives only in
+# .HostConfig.Mounts. Read raw, a container that mounts one read-only subfolder
+# of another app's volume looks like it mounts that app's database — it became
+# the owner by name and the backups moved to its folder. Every mount lookup uses
+# these two formats, so the scan, the owner and --setup see the same thing.
+# ==============================================================================
+_MOUNT_SUBPATH='{{range $h := $.HostConfig.Mounts}}{{if eq $h.Target $m.Destination}}{{with $h.VolumeOptions}}{{with .Subpath}}/{{.}}{{end}}{{end}}{{end}}{{end}}'
+MOUNT_SOURCES_FMT='{{range $m := .Mounts}}{{$m.Source}}'"$_MOUNT_SUBPATH"'{{"\n"}}{{end}}'
+VOLUME_SOURCES_FMT='{{range $m := .Mounts}}{{if eq $m.Type "volume"}}{{$m.Name}}{{"\t"}}{{$m.Source}}'"$_MOUNT_SUBPATH"'{{"\n"}}{{end}}{{end}}'
 
 # ==============================================================================
 # VOLUME CONFIG
@@ -199,7 +212,7 @@ run_setup() {
             esac
             echo ""
         done < <(docker inspect "$cid" \
-                   --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\t"}}{{.Source}}{{"\n"}}{{end}}{{end}}' 2>/dev/null)
+                   --format "$VOLUME_SOURCES_FMT" 2>/dev/null)
     done < <(docker ps -q)
 
     echo "============================================================"
@@ -457,7 +470,7 @@ while IFS= read -r cid; do
     SVC=$(docker inspect "$cid" --format '{{index .Config.Labels "com.docker.compose.service"}}' 2>/dev/null)
     [ -z "$SVC" ] && continue
     CID_SVC[$cid]="$SVC"
-    CID_MOUNTS[$cid]=$(docker inspect "$cid" --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' 2>/dev/null)
+    CID_MOUNTS[$cid]=$(docker inspect "$cid" --format "$MOUNT_SOURCES_FMT" 2>/dev/null)
     CID_IMG[$cid]=$(docker inspect "$cid" --format '{{.Config.Image}}' 2>/dev/null)
     # Compose file(s) this container came from — needed to stop/start a service
     # whose databases live in a named volume, i.e. outside any BASE_DIR tree.
@@ -465,7 +478,7 @@ while IFS= read -r cid; do
     # Only named volumes: bind mounts are already covered by the compose scan.
     # Name and Source both needed: the name is what the config file talks about,
     # the source is where the files actually are.
-    CID_VOLS[$cid]=$(docker inspect "$cid" --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\t"}}{{.Source}}{{"\n"}}{{end}}{{end}}' 2>/dev/null)
+    CID_VOLS[$cid]=$(docker inspect "$cid" --format "$VOLUME_SOURCES_FMT" 2>/dev/null)
 done < <(docker ps -q)
 
 # Registers one candidate database file: dedup, SQLite check, owning service

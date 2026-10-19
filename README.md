@@ -1,6 +1,6 @@
 # DABS — Docker Automated Backup for SQLite
 
-**Project Status**: Active | **Version**: 1.8 | **Maintained**: Yes
+**Project Status**: Active | **Version**: 1.9 | **Maintained**: Yes
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker](https://img.shields.io/badge/docker-required-blue.svg)](https://www.docker.com/)
@@ -196,7 +196,7 @@ Then combine it with a KDD Action and a DABV step inside a **Komodo Procedure** 
 1. Finds all compose files under `BASE_DIR`
 2. Locates `.db` / `.sqlite` / `.sqlite3` files (min 10 KB, valid SQLite header verified)
 3. Scans the **named volumes** of every running container for the same file types, skipping containers whose image is a database engine
-4. Matches each file to a running container via Docker mount inspection
+4. Matches each file to a running container via Docker mount inspection — the most specific mount wins, a volume mounted with a subpath counts only as that subfolder, and a database mounted by several services belongs to the first one by name (the others are stopped with it)
 5. Groups databases by service name
 6. For each service: stops it → compresses all its databases with `gzip` → restarts it
 7. Verifies each backup: gzip integrity + `PRAGMA integrity_check` + size trend
@@ -319,6 +319,9 @@ This downloads the new version alongside the old one. You can then diff them, id
 ---
 
 ## Changelog
+
+### v1.9
+- **A volume mounted with a subpath counts as that subfolder, not the whole volume.** `docker inspect` reports the mount `Source` of the entire volume and keeps the subpath only in `HostConfig.Mounts`. A container mounting one read-only subfolder of another app's volume (a TLS certificate, say) looked like it mounted that app's database: it came first by name, became the owner, and the database's backups silently moved to its folder — and it was stopped along with the real owner every night. Found on a real setup when a plan checking `backups/<app>/` went red with the copies still being made. All mount lookups (scan, owner, `--setup`) now share one format that appends the subpath.
 
 ### v1.8
 - **Retention is now really per database.** Up to 1.7 it kept the N most recent files *per service folder*, while the log said "per database". A service with three databases (Pi-hole) or one database with its `-wal`/`-shm` companions kept a third of the promised history; found on a real setup where an app's own pre-migration copies, each with a new name, pushed the real database down to 3 days out of 14. Dumps are now grouped by database name, and the `-wal`/`-shm` of a run go with it.
