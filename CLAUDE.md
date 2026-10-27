@@ -13,6 +13,8 @@
    ⚠️ Un DB montato da più service (due container sullo stesso volume): il proprietario è il **primo per nome**, gli altri vanno in `SERVICE_PEERS` e si fermano con lui. L'ordine di `CID_SVC` è quello dell'hash e cambia a ogni container ricreato: «il primo trovato» spostava le copie di cartella da una notte all'altra.
    ⚠️ Un mount con **subpath** (compose `volume: subpath:`) in `.Mounts` ha la `Source` del volume INTERO: il subpath sta solo in `.HostConfig.Mounts`. Letto crudo, chi monta una sottocartella di un altro volume ne diventava il proprietario per nome (1.9). Ogni lettura dei mount passa da `MOUNT_SOURCES_FMT`/`VOLUME_SOURCES_FMT`.
 2. **BACKUP+VERIFY** — stop service (+ i peers) → gzip DB (+WAL/SHM) → start → verify 3-step. Stderr catturato su failure.
+   **`LIVE_SERVICES`** (1.10): niente stop — `_live_copy` fa `VACUUM INTO` (sola lettura, `.timeout 30000`) e comprime lo snapshot, senza -wal/-shm. Se fallisce → `_stop_service` e copia classica, riga `OK (STOPPED — live copy failed)`, run WARN. Lo start finale scatta solo se `STOPPED=yes`.
+   ⚠️ Lo snapshot è vacuumato, quindi più piccolo del file vivo: il primo giro dopo il cambio può dare WARN sul calo di dimensione.
 3. **RETENTION** — N-most-recent **per DB** (`_dumps_to_rotate`: raggruppa per nome prima di `_AAAAMMGG_HHMMSS.gz`, i `-wal`/`-shm` seguono la loro principale). ⚠️ Una cartella è un SERVICE, non un DB: contare i file per cartella (fino alla 1.7) dava a Pi-hole un terzo della storia. I log usano `_files_to_rotate`, per cartella, ed è giusto.
 4. **NOTIFICHE** — email HTML (swaks), Telegram, ntfy (indipendenti).
 
@@ -39,7 +41,7 @@ Il giro notturno (cron/KCR) non chiede mai niente: un prompt lì appenderebbe il
 `exit 1` se `COUNT_ERR > 0`, altrimenti `exit 0`. KCR rileva il fallimento.
 
 ## Config (variabili top script)
-`DRY_RUN`, `BASE_DIR`, `BACKUP_ROOT`, `RETENTION_DAYS`, `STOP_TIMEOUT`, `SIZE_DROP_WARN`, `EXCLUDED_SERVICES`, `SCAN_VOLUMES`, `VOLUMES_CONFIG_FILE`, `DB_IMAGE_PATTERNS`, SMTP, Telegram, ntfy.
+`DRY_RUN`, `BASE_DIR`, `BACKUP_ROOT`, `RETENTION_DAYS`, `STOP_TIMEOUT`, `SIZE_DROP_WARN`, `EXCLUDED_SERVICES`, `EXCLUDED_PATHS`, `LIVE_SERVICES`, `SCAN_VOLUMES`, `VOLUMES_CONFIG_FILE`, `DB_IMAGE_PATTERNS`, SMTP, Telegram, ntfy.
 
 ## Dipendenze (auto-installate)
 `file`, `jq`, `swaks`, `gzip`, `sqlite3`, `curl` — richiede root, Debian/Ubuntu.

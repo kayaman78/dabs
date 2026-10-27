@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # DABS — Docker Automated Backup for SQLite
-# Version: 1.9
+# Version: 1.10
 # Platform: Debian / Ubuntu
 # https://github.com/kayaman78/dabs
 # ==============================================================================
@@ -22,6 +22,14 @@ EXCLUDED_SERVICES=()
 # SQLite but are not a database to keep: an app's own pre-migration copies, caches.
 # Example: EXCLUDED_PATHS=("/var/lib/docker/volumes/app-data/_data/copies/*")
 EXCLUDED_PATHS=()
+
+# Services copied WITHOUT stopping them — exact compose service names. SQLite makes
+# the copy itself (VACUUM INTO): one read transaction, a consistent snapshot, and a
+# database in WAL mode keeps taking writes meanwhile. For services where a nightly
+# stop leaves a hole — an NVR stops recording. If the live copy fails, the service
+# is stopped and copied the classic way, and the report says so.
+# Example: LIVE_SERVICES=("frigate")
+LIVE_SERVICES=()
 
 # --- NAMED VOLUME SCAN ---
 SCAN_VOLUMES="on"                                    # [on/off] — also look inside named volumes
@@ -622,6 +630,57 @@ _compose_args() {
     done < <(printf '%s\n' "$1" | tr ',' '\n')
 }
 
+# Stops $SERVICE_NAME and its peers, and checks they really stopped (HOT_COPY).
+_stop_service() {
+    echo "    ⏸️  Stopping $SERVICE_NAME..."
+    docker compose "${COMPOSE_ARGS[@]}" stop -t "$STOP_TIMEOUT" "$SERVICE_NAME"
+    STOPPED="yes"
+
+    # Trusting the stop command is not enough: it fails whenever the compose
+    # file has moved or been renamed since the containers were created — the
+    # label still points at the old path. Without this check the databases
+    # would be copied hot and the report would call it a clean backup.
+    STILL_UP=$(docker ps -q --filter "label=com.docker.compose.service=$SERVICE_NAME" | wc -l)
+    for peer in "${PEER_LIST[@]}"; do
+        echo "    ⏸️  Stopping ${peer%%$'\t'*} too — it mounts the same database..."
+        _compose_args "${peer#*$'\t'}"
+        docker compose "${COMPOSE_ARGS[@]}" stop -t "$STOP_TIMEOUT" "${peer%%$'\t'*}"
+        STILL_UP=$(( STILL_UP + $(docker ps -q --filter "label=com.docker.compose.service=${peer%%$'\t'*}" | wc -l) ))
+    done
+    _compose_args "$cf"
+    if [ "$STILL_UP" -gt 0 ]; then
+        HOT_COPY="yes"
+        echo "    ⚠️  WARNING: $SERVICE_NAME is still running — copying HOT."
+        echo "        A hot SQLite copy may be inconsistent. Check that the compose"
+        echo "        file below still exists and matches the running containers:"
+        printf '        %s\n' "${COMPOSE_ARGS[@]}"
+        [ "$GLOBAL_STATUS" == "OK" ] && GLOBAL_STATUS="WARN"
+    else
+        HOT_COPY="no"
+    fi
+}
+
+# Copies a database while its service keeps running (LIVE_SERVICES): SQLite
+# writes a consistent snapshot (VACUUM INTO — one read transaction; in WAL mode
+# the writers are not blocked), and the snapshot is compressed to $2.
+# ⚠️ The snapshot is a whole database on its own: vacuumed, so smaller than the
+#    live file, and with no -wal/-shm to go with it. Older sqlite3 (< 3.27) does
+#    not know VACUUM INTO: it fails here, and the caller falls back to a stop.
+_live_copy() {
+    local db="$1" dest_gz="$2" tmp
+    tmp="$(dirname "$dest_gz")/.live-$(basename "${dest_gz%.gz}")"
+    rm -f "$tmp"
+    if ! sqlite3 -readonly -cmd ".timeout 30000" "$db" "VACUUM INTO '${tmp//\'/\'\'}';"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    if ! gzip -c "$tmp" > "$dest_gz"; then
+        rm -f "$tmp" "$dest_gz"
+        return 1
+    fi
+    rm -f "$tmp"
+}
+
 for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
     cf="${SERVICE_CF[$SERVICE_NAME]}"
     mapfile -t PEER_LIST < <(printf '%s' "${SERVICE_PEERS[$SERVICE_NAME]}" | grep -v '^$')
@@ -642,32 +701,16 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
     echo ""
     echo "[*] 🗄️  Service: $SERVICE_NAME — $DB_COUNT database(s) to back up"
 
-    if [ "$DRY_RUN" == "off" ]; then
-        echo "    ⏸️  Stopping $SERVICE_NAME..."
-        docker compose "${COMPOSE_ARGS[@]}" stop -t "$STOP_TIMEOUT" "$SERVICE_NAME"
-
-        # Trusting the stop command is not enough: it fails whenever the compose
-        # file has moved or been renamed since the containers were created — the
-        # label still points at the old path. Without this check the databases
-        # would be copied hot and the report would call it a clean backup.
-        STILL_UP=$(docker ps -q --filter "label=com.docker.compose.service=$SERVICE_NAME" | wc -l)
-        for peer in "${PEER_LIST[@]}"; do
-            echo "    ⏸️  Stopping ${peer%%$'\t'*} too — it mounts the same database..."
-            _compose_args "${peer#*$'\t'}"
-            docker compose "${COMPOSE_ARGS[@]}" stop -t "$STOP_TIMEOUT" "${peer%%$'\t'*}"
-            STILL_UP=$(( STILL_UP + $(docker ps -q --filter "label=com.docker.compose.service=${peer%%$'\t'*}" | wc -l) ))
-        done
-        _compose_args "$cf"
-        if [ "$STILL_UP" -gt 0 ]; then
-            HOT_COPY="yes"
-            echo "    ⚠️  WARNING: $SERVICE_NAME is still running — copying HOT."
-            echo "        A hot SQLite copy may be inconsistent. Check that the compose"
-            echo "        file below still exists and matches the running containers:"
-            printf '        %s\n' "${COMPOSE_ARGS[@]}"
-            [ "$GLOBAL_STATUS" == "OK" ] && GLOBAL_STATUS="WARN"
-        else
-            HOT_COPY="no"
-        fi
+    LIVE="no"
+    if [ ${#LIVE_SERVICES[@]} -gt 0 ] && printf '%s\n' "${LIVE_SERVICES[@]}" | grep -qx "$SERVICE_NAME"; then
+        LIVE="yes"
+    fi
+    STOPPED="no"
+    HOT_COPY="no"
+    if [ "$LIVE" == "yes" ]; then
+        echo "    🟢 Live copy — $SERVICE_NAME keeps running (VACUUM INTO)"
+    elif [ "$DRY_RUN" == "off" ]; then
+        _stop_service
     fi
 
     DEST_DIR="$BACKUP_ROOT/$SERVICE_NAME"
@@ -698,8 +741,33 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
             DEST_BASE="$DEST_DIR/${DB_NAME}_${DATE_ID}"
 
             err_file=$(mktemp)
-            if gzip -c "$db_path" > "${DEST_BASE}.gz" 2>"$err_file"; then
-                rm -f "$err_file"
+            BACKUP_DONE="no"
+            if [ "$LIVE" == "yes" ] && [ "$STOPPED" == "no" ]; then
+                if _live_copy "$db_path" "${DEST_BASE}.gz" 2>"$err_file"; then
+                    BACKUP_DONE="yes"
+                    ROW_BACKUP_STATUS="OK (LIVE — service kept running)"
+                    echo "      ✅ Backup OK (live) → ${DEST_BASE}.gz"
+                else
+                    # The live copy is the exception, the stop is the proven way:
+                    # fall back to it rather than leave the database without a copy.
+                    echo "      ⚠️  Live copy failed: $(tail -n 1 "$err_file")"
+                    echo "      → stopping $SERVICE_NAME and copying it the classic way"
+                    : > "$err_file"
+                    _stop_service
+                    if [ "$HOT_COPY" != "yes" ]; then
+                        ROW_BACKUP_COLOR="#fff3cd"
+                        ROW_BACKUP_ICON="⚠️"
+                        ROW_BACKUP_STATUS="OK (STOPPED — live copy failed)"
+                        [ "$GLOBAL_STATUS" == "OK" ] && GLOBAL_STATUS="WARN"
+                    else
+                        ROW_BACKUP_COLOR="#fff3cd"
+                        ROW_BACKUP_ICON="⚠️"
+                        ROW_BACKUP_STATUS="OK (HOT — live copy failed, service did not stop)"
+                    fi
+                fi
+            fi
+            if [ "$BACKUP_DONE" == "no" ] && gzip -c "$db_path" > "${DEST_BASE}.gz" 2>"$err_file"; then
+                BACKUP_DONE="yes"
                 echo "      ✅ Backup OK → ${DEST_BASE}.gz"
                 if [ -f "${db_path}-wal" ]; then
                     if gzip -c "${db_path}-wal" > "${DEST_BASE}-wal.gz" 2>/dev/null; then
@@ -717,6 +785,9 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
                         rm -f "${DEST_BASE}-shm.gz"
                     fi
                 fi
+            fi
+            if [ "$BACKUP_DONE" == "yes" ]; then
+                rm -f "$err_file"
                 ((COUNT_OK++))
 
                 # --- VERIFY ---
@@ -775,7 +846,7 @@ for SERVICE_NAME in "${!SERVICE_DBS[@]}"; do
         </tr>"
     done
 
-    if [ "$DRY_RUN" == "off" ]; then
+    if [ "$STOPPED" == "yes" ]; then
         echo "    ▶️  Starting $SERVICE_NAME..."
         docker compose "${COMPOSE_ARGS[@]}" start "$SERVICE_NAME"
         for peer in "${PEER_LIST[@]}"; do

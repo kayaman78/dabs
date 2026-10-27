@@ -1,6 +1,6 @@
 # DABS — Docker Automated Backup for SQLite
 
-**Project Status**: Active | **Version**: 1.9 | **Maintained**: Yes
+**Project Status**: Active | **Version**: 1.10 | **Maintained**: Yes
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker](https://img.shields.io/badge/docker-required-blue.svg)](https://www.docker.com/)
@@ -18,6 +18,7 @@ Automatic SQLite backup script for Docker environments. Discovers SQLite databas
 - **Named volume support** — also scans the named volumes of running containers, so databases with no path under `BASE_DIR` are still found
 - **Database volumes skipped** — volumes belonging to database engines are left to KDD, never opened by DABS
 - **Service-aware** — groups multiple databases per service: one stop/start per service, not per file
+- **Live copies** — services listed in `LIVE_SERVICES` are never stopped: SQLite itself writes a consistent snapshot (`VACUUM INTO`) while they keep running (see below)
 - **WAL support** — backs up `-wal` and `-shm` files alongside the main database
 - **Backup verification** — every backup is verified immediately after creation (see below)
 - **Retention** — keeps the `RETENTION_DAYS` most recent dumps per database (calendar-independent — pause-safe)
@@ -79,6 +80,7 @@ SIZE_DROP_WARN=20                      # % size drop vs previous backup that tri
 
 EXCLUDED_SERVICES=()                   # Exact compose service names to skip
 EXCLUDED_PATHS=()                      # Glob patterns on the database's host path to skip
+LIVE_SERVICES=()                       # Services copied while running (VACUUM INTO), never stopped
 
 # Container images whose named volumes are never scanned (data belongs to KDD).
 # Substring match on the image name — add your own engines if you run any.
@@ -198,7 +200,7 @@ Then combine it with a KDD Action and a DABV step inside a **Komodo Procedure** 
 3. Scans the **named volumes** of every running container for the same file types, skipping containers whose image is a database engine
 4. Matches each file to a running container via Docker mount inspection — the most specific mount wins, a volume mounted with a subpath counts only as that subfolder, and a database mounted by several services belongs to the first one by name (the others are stopped with it)
 5. Groups databases by service name
-6. For each service: stops it → compresses all its databases with `gzip` → restarts it
+6. For each service: stops it → compresses all its databases with `gzip` → restarts it. A service in `LIVE_SERVICES` is not stopped: each database is snapshotted with `VACUUM INTO` and the snapshot compressed; if that fails, the service is stopped and copied the classic way
 7. Verifies each backup: gzip integrity + `PRAGMA integrity_check` + size trend
 8. Applies retention policy — keeps the N most recent `.gz` files per database (and logs); older ones removed only when replaced
 9. Sends email report, Telegram message, and/or ntfy alert — each independently
@@ -277,6 +279,28 @@ which takes proper logical dumps without stopping anything.
 
 ---
 
+## Live copies — `LIVE_SERVICES`
+
+Stopping a service is the simplest way to copy its database safely, and for most containers a few seconds of downtime at night cost nothing. For some they do: an NVR stops recording, a monitor stops watching — every night, at the same hour, which is exactly the hole someone would choose.
+
+For those, list the service in `LIVE_SERVICES`:
+
+```bash
+LIVE_SERVICES=("frigate")
+```
+
+DABS then asks SQLite for the copy instead of copying the file: `VACUUM INTO` writes a complete, consistent snapshot of the database inside a single read transaction. If the database runs in **WAL mode** (most busy applications do), the service keeps writing meanwhile and never notices. Measured on a real Frigate database (528 MB, WAL, writing): the snapshot took under a second of reading, matched the live tables row for row and passed `integrity_check`; compression then works on the snapshot, not on the service.
+
+Things to know:
+
+- **The snapshot is smaller than the live file** — it is vacuumed. The first live backup after a classic one can trip the size-trend check (`SIZE_DROP_WARN`) on a heavily fragmented database; the next ones compare like with like.
+- **There are no `-wal`/`-shm` files** next to a live backup: the snapshot is a whole database on its own.
+- **It needs `sqlite3` 3.27 or newer on the host** (Debian 11+, Ubuntu 20.04+). An older one does not know `VACUUM INTO`.
+- **If the live copy fails** — old `sqlite3`, a database held in exclusive locking mode, a timeout after 30 seconds of busy — DABS stops the service and copies it the classic way, so the database is never left without a backup. The row says `OK (STOPPED — live copy failed)` and the run is WARN.
+- **In rollback-journal mode** (not WAL) the copy works too, but writers wait for it to finish: the service is not stopped, just paused for the length of the read.
+
+---
+
 ## Updating
 
 The script logic and your configuration live in the same file (`sqlite-backup.sh`), so updating requires a quick two-step process to avoid overwriting your settings.
@@ -319,6 +343,9 @@ This downloads the new version alongside the old one. You can then diff them, id
 ---
 
 ## Changelog
+
+### v1.10
+- **`LIVE_SERVICES` — copy a database without stopping its service.** Stopping every service each night was the one safe way DABS knew, and for an NVR it means no recording and no detection at the same hour every night. Listed services are now copied with SQLite's own `VACUUM INTO`: one read transaction, a consistent snapshot, and a WAL database keeps taking writes meanwhile. Measured on a real Frigate database: under a second of reading, identical row counts, `integrity_check` ok, the service never stopped. If the live copy fails, the service is stopped and copied the classic way and the run is WARN — the fallback was seen working on a test bench with a `sqlite3` that does not know `VACUUM INTO`. Services start again at the end only if they were actually stopped.
 
 ### v1.9
 - **A volume mounted with a subpath counts as that subfolder, not the whole volume.** `docker inspect` reports the mount `Source` of the entire volume and keeps the subpath only in `HostConfig.Mounts`. A container mounting one read-only subfolder of another app's volume (a TLS certificate, say) looked like it mounted that app's database: it came first by name, became the owner, and the database's backups silently moved to its folder — and it was stopped along with the real owner every night. Found on a real setup when a plan checking `backups/<app>/` went red with the copies still being made. All mount lookups (scan, owner, `--setup`) now share one format that appends the subpath.
