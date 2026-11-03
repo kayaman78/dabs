@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # DABS — Docker Automated Backup for SQLite
-# Version: 1.10
+# Version: 1.11
 # Platform: Debian / Ubuntu
 # https://github.com/kayaman78/dabs
 # ==============================================================================
@@ -12,7 +12,7 @@ BASE_DIR="/srv/docker"                     # Root directory to scan for compose 
 BACKUP_ROOT="/srv/docker/dabs/backups"     # Root directory where backups will be stored
 RETENTION_DAYS=7                           # Number of most recent dumps to keep per database (calendar-independent)
 STOP_TIMEOUT=60                            # Seconds to wait for container stop before proceeding
-SIZE_DROP_WARN=20                          # % size drop vs previous backup that triggers a warning
+SIZE_DROP_WARN=20                          # % drop of data (pages in use) vs previous backup that triggers a warning
 
 # Services to skip — exact compose service names (com.docker.compose.service label)
 # Example: EXCLUDED_SERVICES=("homeassistant" "pihole")
@@ -305,63 +305,89 @@ echo "============================================================"
 # ==============================================================================
 # VERIFY FUNCTION
 # Checks a freshly created .gz backup:
-#   1. gzip integrity
-#   2. SQLite PRAGMA integrity_check (decompress to tmp)
-#   3. Size comparison vs previous backup (warn if drop > SIZE_DROP_WARN%)
+#   1. gzip integrity (of the -wal copy too, when there is one)
+#   2. SQLite PRAGMA integrity_check on the database as a restore would see it:
+#      the main file plus its -wal copy, decompressed side by side in a tmp dir
+#   3. Content comparison vs previous backup (warn if drop > SIZE_DROP_WARN%)
 #
 # Outputs: "OK" | "WARN:<reason>" | "FAIL:<reason>"
 # ==============================================================================
+
+# Decompress a backup and its -wal copy (if any) into an empty dir, as db + db-wal.
+# ⚠️ The main file alone is NOT the database when the service runs in WAL mode:
+# measured on a real one, the main file swung between 2226 and 2862 pages in use
+# on alternate nights while main + WAL stayed at 2859-2899, rows growing.
+_restore_to_dir() {
+    local gz_file="$1" dir="$2"
+    local wal_gz="${gz_file%.gz}-wal.gz"
+    zcat "$gz_file" > "$dir/db" 2>/dev/null || return 1
+    if [ -f "$wal_gz" ]; then
+        zcat "$wal_gz" > "$dir/db-wal" 2>/dev/null || return 1
+    fi
+    return 0
+}
+
+# Bytes of data in a restored database: (pages - free pages) x page size.
+# ⚠️ Not the .gz size: how well a database compresses changes from night to
+# night with no data lost (1.47, 1.89, 1.51 MB on consecutive nights for the
+# same 12 MB of rows). Nor the file size: a vacuumed snapshot (LIVE_SERVICES)
+# is smaller with the same data. Empty if sqlite3 cannot read it.
+_content_bytes() {
+    sqlite3 "$1" "PRAGMA page_count; PRAGMA freelist_count; PRAGMA page_size;" 2>/dev/null \
+        | paste -sd' ' - | awk 'NF == 3 { print ($1 - $2) * $3 }'
+}
+
 verify_sqlite_backup() {
     local gz_file="$1"
     local dest_dir="$2"
     local db_name="$3"
-    local warn_msg=""
+    local wal_gz="${gz_file%.gz}-wal.gz"
 
     # Check 1 — gzip integrity
     if ! gzip -t "$gz_file" 2>/dev/null; then
         echo "FAIL:gzip corrupt"
         return 1
     fi
+    if [ -f "$wal_gz" ] && ! gzip -t "$wal_gz" 2>/dev/null; then
+        echo "FAIL:gzip corrupt (-wal)"
+        return 1
+    fi
 
-    # Check 2 — SQLite integrity_check
-    local tmp_db
-    tmp_db=$(mktemp /tmp/dabs_verify_XXXXXX.db)
-    if ! zcat "$gz_file" > "$tmp_db" 2>/dev/null; then
-        rm -f "$tmp_db"
+    # Check 2 — SQLite integrity_check, main + WAL
+    local tmp_dir
+    tmp_dir=$(mktemp -d /tmp/dabs_verify_XXXXXX)
+    if ! _restore_to_dir "$gz_file" "$tmp_dir"; then
+        rm -rf "${tmp_dir:?}"
         echo "FAIL:decompress error"
         return 1
     fi
 
-    local integrity
-    integrity=$(sqlite3 "$tmp_db" "PRAGMA integrity_check;" 2>/dev/null)
-    rm -f "$tmp_db"
+    local integrity curr_size
+    integrity=$(sqlite3 "$tmp_dir/db" "PRAGMA integrity_check;" 2>/dev/null)
+    curr_size=$(_content_bytes "$tmp_dir/db")
+    rm -rf "${tmp_dir:?}"
 
     if [ "$integrity" != "ok" ]; then
         echo "FAIL:integrity_check failed"
         return 1
     fi
 
-    # Check 3 — size drop vs previous backup
-    local curr_size
-    curr_size=$(stat -c%s "$gz_file" 2>/dev/null || echo 0)
-
-    # Find the most recent previous backup for this db (exclude current file)
+    # Check 3 — content drop vs previous backup, restored the same way
     local prev_backup
     prev_backup=$(find "$dest_dir" -name "${db_name}_*.gz" \
         ! -newer "$gz_file" ! -samefile "$gz_file" \
         -not -name "*-wal*" -not -name "*-shm*" \
         2>/dev/null | sort | tail -1)
 
-    if [ -n "$prev_backup" ]; then
-        local prev_size
-        prev_size=$(stat -c%s "$prev_backup" 2>/dev/null || echo 0)
-        if [ "$prev_size" -gt 0 ]; then
+    if [ -n "$prev_backup" ] && [ -n "$curr_size" ]; then
+        local prev_size=""
+        tmp_dir=$(mktemp -d /tmp/dabs_verify_XXXXXX)
+        _restore_to_dir "$prev_backup" "$tmp_dir" && prev_size=$(_content_bytes "$tmp_dir/db")
+        rm -rf "${tmp_dir:?}"
+        if [ -n "$prev_size" ] && [ "$prev_size" -gt 0 ]; then
             local threshold=$(( prev_size * (100 - SIZE_DROP_WARN) / 100 ))
             if [ "$curr_size" -lt "$threshold" ]; then
-                local prev_h curr_h
-                prev_h=$(du -h "$prev_backup" | cut -f1)
-                curr_h=$(du -h "$gz_file" | cut -f1)
-                echo "WARN:size drop ${prev_h}→${curr_h}"
+                echo "WARN:content drop $(numfmt --to=iec "$prev_size")→$(numfmt --to=iec "$curr_size") (pages in use)"
                 return 0
             fi
         fi

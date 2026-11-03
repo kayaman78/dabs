@@ -12,9 +12,9 @@
    Entrambe passano da `register_db()`: `EXCLUDED_PATHS`, header SQLite verificato con `file`, mappatura a container via docker inspect, raggruppamento per service, `EXCLUDED_SERVICES` applicato.
    ⚠️ Un DB montato da più service (due container sullo stesso volume): il proprietario è il **primo per nome**, gli altri vanno in `SERVICE_PEERS` e si fermano con lui. L'ordine di `CID_SVC` è quello dell'hash e cambia a ogni container ricreato: «il primo trovato» spostava le copie di cartella da una notte all'altra.
    ⚠️ Un mount con **subpath** (compose `volume: subpath:`) in `.Mounts` ha la `Source` del volume INTERO: il subpath sta solo in `.HostConfig.Mounts`. Letto crudo, chi monta una sottocartella di un altro volume ne diventava il proprietario per nome (1.9). Ogni lettura dei mount passa da `MOUNT_SOURCES_FMT`/`VOLUME_SOURCES_FMT`.
-2. **BACKUP+VERIFY** — stop service (+ i peers) → gzip DB (+WAL/SHM) → start → verify 3-step. Stderr catturato su failure.
+2. **BACKUP+VERIFY** — stop service (+ i peers) → gzip DB (+WAL/SHM) → start → verify 3-step su principale + `-wal` ricostruiti insieme (1.11). Stderr catturato su failure.
    **`LIVE_SERVICES`** (1.10): niente stop — `_live_copy` fa `VACUUM INTO` (sola lettura, `.timeout 30000`) e comprime lo snapshot, senza -wal/-shm. Se fallisce → `_stop_service` e copia classica, riga `OK (STOPPED — live copy failed)`, run WARN. Lo start finale scatta solo se `STOPPED=yes`.
-   ⚠️ Lo snapshot è vacuumato, quindi più piccolo del file vivo: il primo giro dopo il cambio può dare WARN sul calo di dimensione.
+   Lo snapshot è vacuumato, più piccolo del file vivo: la verifica conta le pagine usate, non il peso, quindi il primo giro dopo il cambio non dà WARN (fino alla 1.10 sì).
 3. **RETENTION** — N-most-recent **per DB** (`_dumps_to_rotate`: raggruppa per nome prima di `_AAAAMMGG_HHMMSS.gz`, i `-wal`/`-shm` seguono la loro principale). ⚠️ Una cartella è un SERVICE, non un DB: contare i file per cartella (fino alla 1.7) dava a Pi-hole un terzo della storia. I log usano `_files_to_rotate`, per cartella, ed è giusto.
 4. **NOTIFICHE** — email HTML (swaks), Telegram, ntfy (indipendenti).
 
@@ -35,7 +35,9 @@ Il giro notturno (cron/KCR) non chiede mai niente: un prompt lì appenderebbe il
 ## Verify 3-step
 1. `gzip -t` integrità
 2. decompress temp + `sqlite3 PRAGMA integrity_check`
-3. size drop vs backup precedente (warn se > `SIZE_DROP_WARN`%)
+3. calo dei DATI vs backup precedente, ricostruito allo stesso modo: pagine usate (`page_count - freelist_count`) × page size (warn se > `SIZE_DROP_WARN`%)
+
+⚠️ Mai il peso del `.gz` (la compressione cambia da sola: 1,5↔1,9 MB a notti alterne su 12 MB di righe che crescono) né il principale da solo (in WAL una parte del DB vive nel `-wal`: da solo oscilla di un quarto delle pagine). Fino alla 1.10 si misuravano tutti e due: falsi WARN, e un `-wal` rotto passava.
 
 ## Exit code
 `exit 1` se `COUNT_ERR > 0`, altrimenti `exit 0`. KCR rileva il fallimento.

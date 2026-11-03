@@ -1,6 +1,6 @@
 # DABS — Docker Automated Backup for SQLite
 
-**Project Status**: Active | **Version**: 1.10 | **Maintained**: Yes
+**Project Status**: Active | **Version**: 1.11 | **Maintained**: Yes
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker](https://img.shields.io/badge/docker-required-blue.svg)](https://www.docker.com/)
@@ -35,20 +35,24 @@ Automatic SQLite backup script for Docker environments. Discovers SQLite databas
 After each backup is created, DABS runs three checks in sequence. A backup must pass all three to be marked OK.
 
 **1. gzip integrity**
-Runs `gzip -t` on the `.gz` file. Catches truncated or corrupt archives produced by write errors or disk issues.
+Runs `gzip -t` on the `.gz` file, and on its `-wal` copy when there is one. Catches truncated or corrupt archives produced by write errors or disk issues.
 
 **2. SQLite integrity check**
-Decompresses the backup to a temporary file and runs `PRAGMA integrity_check` via `sqlite3`. This is SQLite's built-in consistency check — it verifies the B-tree structure, page consistency, and internal pointers. Returns `ok` if the database is intact. The temp file is deleted immediately after.
+Decompresses the backup **and its `-wal` copy, side by side**, into a temporary folder — the database exactly as a restore would bring it back — and runs `PRAGMA integrity_check` via `sqlite3`. This is SQLite's built-in consistency check — it verifies the B-tree structure, page consistency, and internal pointers. Returns `ok` if the database is intact. The temp folder is deleted immediately after.
 
-**3. Size trend**
-Compares the size of the new backup against the most recent previous backup for the same database. If the new file is smaller by more than `SIZE_DROP_WARN`% (default: 20%), the verify is marked WARN with the old and new sizes shown. This catches silent data loss — for example a service that truncated its database or a misconfiguration that wiped tables.
+In WAL mode the main file alone is not the database: part of it lives in the `-wal` until the next checkpoint. Measured on a real one, the main file alone swung by a quarter of its pages in use from one night to the next, while main + WAL stayed level with the rows growing.
+
+**3. Content trend**
+Compares the data in the new backup with the most recent previous backup for the same database, both restored as above: the pages in use (`page_count - freelist_count`, times the page size). If the new one holds less by more than `SIZE_DROP_WARN`% (default: 20%), the verify is marked WARN with the old and new amounts shown. This catches silent data loss — for example a service that truncated its database or a misconfiguration that wiped tables.
+
+It does not compare the size of the `.gz`: how well a database compresses changes from night to night with no data lost — on a real 12 MB database, 1.5 and 1.9 MB on alternate nights, rows growing. Nor the file size: a vacuumed copy is smaller with the same data.
 
 ### Verify vs Backup status in the email
 
 | Backup | Verify | Meaning |
 |--------|--------|---------|
 | OK | OK | Backup written and verified clean |
-| OK | WARN | Backup valid but size dropped unexpectedly — investigate |
+| OK | WARN | Backup valid but holds less data than the previous one — investigate |
 | OK | FAIL | Backup written but corrupt — do not rely on it |
 | ERROR | skipped | Backup failed, verify not attempted |
 
@@ -76,7 +80,7 @@ BASE_DIR="/srv/docker"                 # Root directory to scan for compose file
 BACKUP_ROOT="/srv/docker/dabs/backups" # Root directory where backups will be stored
 RETENTION_DAYS=7                       # Number of most recent dumps to keep per database (calendar-independent)
 STOP_TIMEOUT=60                        # Seconds to wait for container stop before proceeding
-SIZE_DROP_WARN=20                      # % size drop vs previous backup that triggers a warning
+SIZE_DROP_WARN=20                      # % drop of data (pages in use) vs previous backup that triggers a warning
 
 EXCLUDED_SERVICES=()                   # Exact compose service names to skip
 EXCLUDED_PATHS=()                      # Glob patterns on the database's host path to skip
@@ -293,7 +297,7 @@ DABS then asks SQLite for the copy instead of copying the file: `VACUUM INTO` wr
 
 Things to know:
 
-- **The snapshot is smaller than the live file** — it is vacuumed. The first live backup after a classic one can trip the size-trend check (`SIZE_DROP_WARN`) on a heavily fragmented database; the next ones compare like with like.
+- **The snapshot is smaller than the live file** — it is vacuumed. The content check counts pages in use, not file size, so the first live backup after a classic one compares like with like (up to 1.10 it could trip a WARN).
 - **There are no `-wal`/`-shm` files** next to a live backup: the snapshot is a whole database on its own.
 - **It needs `sqlite3` 3.27 or newer on the host** (Debian 11+, Ubuntu 20.04+). An older one does not know `VACUUM INTO`.
 - **If the live copy fails** — old `sqlite3`, a database held in exclusive locking mode, a timeout after 30 seconds of busy — DABS stops the service and copies it the classic way, so the database is never left without a backup. The row says `OK (STOPPED — live copy failed)` and the run is WARN.
@@ -343,6 +347,9 @@ This downloads the new version alongside the old one. You can then diff them, id
 ---
 
 ## Changelog
+
+### v1.11
+- **The verify reads the database as a restore would see it, and measures data, not compression.** Two false alarms on a real setup: a 12 MB WAL database "dropped" from 1.9 to 1.5 MB on alternate nights. The size check compared `.gz` files, and how well a database compresses changes with no data lost. Looking closer, the integrity check and the size were also taken on the main file alone, while in WAL mode part of the database lives in the `-wal` copy kept next to it. Now the main file and its `-wal` are decompressed side by side, `integrity_check` runs on that, and the trend compares pages in use (`page_count - freelist_count`) with the previous backup restored the same way. A corrupt `-wal` archive is now a FAIL — before, it passed. On the seven real nights that gave two WARNs, zero; with two thirds of the rows deleted, WARN with or without `VACUUM`; a vacuumed copy of the same data, OK (the first `LIVE_SERVICES` night no longer warns).
 
 ### v1.10
 - **`LIVE_SERVICES` — copy a database without stopping its service.** Stopping every service each night was the one safe way DABS knew, and for an NVR it means no recording and no detection at the same hour every night. Listed services are now copied with SQLite's own `VACUUM INTO`: one read transaction, a consistent snapshot, and a WAL database keeps taking writes meanwhile. Measured on a real Frigate database: under a second of reading, identical row counts, `integrity_check` ok, the service never stopped. If the live copy fails, the service is stopped and copied the classic way and the run is WARN — the fallback was seen working on a test bench with a `sqlite3` that does not know `VACUUM INTO`. Services start again at the end only if they were actually stopped.
